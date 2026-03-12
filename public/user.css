@@ -1,0 +1,13 @@
+.details-card {
+  min-height: 280px;
+}
+
+.details-card .details-list {
+  max-height: 46vh;
+}
+
+@media (max-width: 1500px) {
+  .details-card {
+    min-height: 240px;
+  }
+}

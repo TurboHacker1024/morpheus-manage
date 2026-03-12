@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Morpheus Manage - Users</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="rail">
+        <a class="rail-logo" href="/" aria-label="Morpheus Manage home">MM</a>
+        <nav class="rail-nav" aria-label="Primary navigation">
+          <a class="rail-link active" href="/users.html" data-label="Users" aria-label="Users">
+            <span class="rail-icon"><img src="/icons/people-outline.svg" alt="" /></span>
+            <span class="rail-text">Users</span>
+          </a>
+          <a class="rail-link" href="/rooms.html" data-label="Rooms" aria-label="Rooms">
+            <span class="rail-icon"><img src="/icons/message-circle-outline.svg" alt="" /></span>
+            <span class="rail-text">Rooms</span>
+          </a>
+          <a class="rail-link" href="/media.html" data-label="Media" aria-label="Media">
+            <span class="rail-icon"><img src="/icons/image-outline.svg" alt="" /></span>
+            <span class="rail-text">Media</span>
+          </a>
+        </nav>
+      </aside>
+
+      <aside class="side-pane">
+        <a class="brand-link" href="/">Morpheus Manage</a>
+        <p class="pane-subtitle">User administration workspace</p>
+
+        <div class="pane-section">
+          <h2>Users</h2>
+          <a class="pane-link active" href="#listCard">Directory</a>
+          <a class="pane-link" href="#createCard">Create account</a>
+          <a class="pane-link" href="#listCard">Access controls</a>
+          <a class="pane-link" href="#listCard">Activity and audits</a>
+        </div>
+
+        <p class="pane-note">Lock and deactivate actions require typed confirmation.</p>
+
+        <div class="pane-footer">Connected server: <span id="serverName">...</span></div>
+      </aside>
+
+      <main class="workspace">
+        <header class="workspace-header">
+          <div>
+            <p class="page-eyebrow">Morpheus Manage</p>
+            <p class="page-breadcrumb">Users / Directory</p>
+            <h1 class="page-title">User management</h1>
+            <p class="page-subtitle">
+              Browse local accounts on <span id="serverNameInline">...</span>, create users, and
+              manage access controls without using raw admin API calls.
+            </p>
+          </div>
+          <div class="status" id="status">Loading configuration...</div>
+        </header>
+
+        <div class="workspace-body">
+          <section class="grid user-grid">
+            <div class="card" id="listCard">
+              <div class="card-header">
+                <div>
+                  <h2>Users</h2>
+                  <p>Directory, status, and account actions.</p>
+                </div>
+                <div class="pager">
+                  <button class="btn ghost" id="prevBtn">Prev</button>
+                  <span id="pageLabel">Page 1</span>
+                  <button class="btn ghost" id="nextBtn">Next</button>
+                </div>
+              </div>
+              <div class="list-controls">
+                <label>
+                  Page size
+                  <select id="pageSize">
+                    <option value="10" selected>10</option>
+                    <option value="25">25</option>
+                    <option value="50">50</option>
+                    <option value="100">100</option>
+                  </select>
+                </label>
+                <div class="toggle">
+                  <span class="toggle-label" id="showDisabledLabel">Hide disabled users</span>
+                  <button
+                    class="toggle-switch"
+                    type="button"
+                    id="showDisabledToggle"
+                    data-state="off"
+                    aria-pressed="false"
+                  >
+                    <span class="toggle-thumb"></span>
+                  </button>
+                </div>
+                <button class="btn" id="refreshBtn">Refresh</button>
+              </div>
+              <div class="table" id="usersTable"></div>
+            </div>
+
+            <div class="card" id="createCard">
+              <div class="card-header">
+                <div>
+                  <h2>Create user</h2>
+                  <p>Create a new local user account.</p>
+                </div>
+              </div>
+              <form id="createForm" class="form">
+                <label>
+                  Localpart
+                  <input type="text" id="localpart" placeholder="alice" required />
+                </label>
+                <label>
+                  Password
+                  <input type="password" id="password" placeholder="Temporary password" />
+                </label>
+                <label>
+                  Display name
+                  <input type="text" id="displayname" placeholder="Alice Example" />
+                </label>
+                <label class="checkbox">
+                  <input type="checkbox" id="isAdmin" />
+                  Admin privileges
+                </label>
+                <button class="btn primary" type="submit">Create user</button>
+                <p class="form-note" id="createNote"></p>
+              </form>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <div class="modal hidden" id="deactivateModal" aria-hidden="true">
+      <div class="modal-card">
+        <p class="modal-tag">Danger zone</p>
+        <h3>Deactivate this user?</h3>
+        <p class="modal-text">
+          Deactivation revokes access tokens, clears devices, and removes the user from rooms. No data
+          is deleted and you can re-enable the account later.
+        </p>
+        <div class="modal-warning" id="deactivateTarget"></div>
+        <label>
+          Type the full user ID to confirm
+          <input type="text" id="deactivateConfirm" placeholder="@user:example.com" />
+        </label>
+        <div class="modal-actions">
+          <button class="btn ghost" id="deactivateCancel">Cancel</button>
+          <button class="btn primary" id="deactivateConfirmBtn" disabled>Deactivate user</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal hidden" id="reactivateModal" aria-hidden="true">
+      <div class="modal-card">
+        <p class="modal-tag">Re-enable access</p>
+        <h3>Re-activate this user?</h3>
+        <p class="modal-text">
+          Reactivation restores access. For local accounts, set a new password before enabling.
+        </p>
+        <div class="modal-warning" id="reactivateTarget"></div>
+        <label>
+          New password (recommended)
+          <input type="password" id="reactivatePassword" placeholder="Set a new password" />
+        </label>
+        <label>
+          Type the full user ID to confirm
+          <input type="text" id="reactivateConfirm" placeholder="@user:example.com" />
+        </label>
+        <div class="modal-actions">
+          <button class="btn ghost" id="reactivateCancel">Cancel</button>
+          <button class="btn primary" id="reactivateConfirmBtn" disabled>Re-enable user</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal hidden" id="renameModal" aria-hidden="true">
+      <div class="modal-card">
+        <p class="modal-tag">Profile update</p>
+        <h3>Rename display name</h3>
+        <p class="modal-text">Update the public display name for this account.</p>
+        <div class="modal-warning" id="renameTarget"></div>
+        <label>
+          New display name
+          <input type="text" id="renameDisplayName" placeholder="Display name" />
+        </label>
+        <label>
+          Type the full user ID to confirm
+          <input type="text" id="renameConfirm" placeholder="@user:example.com" />
+        </label>
+        <div class="modal-actions">
+          <button class="btn ghost" id="renameCancel">Cancel</button>
+          <button class="btn primary" id="renameConfirmBtn" disabled>Update name</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal hidden" id="passwordModal" aria-hidden="true">
+      <div class="modal-card">
+        <p class="modal-tag">Credentials</p>
+        <h3>Reset password</h3>
+        <p class="modal-text">Sets a new password and invalidates existing access tokens.</p>
+        <div class="modal-warning" id="passwordTarget"></div>
+        <label>
+          New password
+          <input type="password" id="passwordValue" placeholder="New password" />
+        </label>
+        <label>
+          Type the full user ID to confirm
+          <input type="text" id="passwordConfirm" placeholder="@user:example.com" />
+        </label>
+        <div class="modal-actions">
+          <button class="btn ghost" id="passwordCancel">Cancel</button>
+          <button class="btn primary" id="passwordConfirmBtn" disabled>Reset password</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal hidden" id="adminModal" aria-hidden="true">
+      <div class="modal-card">
+        <p class="modal-tag">Privileges</p>
+        <h3>Change admin status</h3>
+        <p class="modal-text" id="adminStatusText">Adjust admin privileges for this account.</p>
+        <div class="modal-warning" id="adminTarget"></div>
+        <label class="checkbox">
+          <input type="checkbox" id="adminToggle" />
+          Grant admin privileges
+        </label>
+        <label>
+          Type the full user ID to confirm
+          <input type="text" id="adminConfirm" placeholder="@user:example.com" />
+        </label>
+        <div class="modal-actions">
+          <button class="btn ghost" id="adminCancel">Cancel</button>
+          <button class="btn primary" id="adminConfirmBtn" disabled>Update role</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal hidden" id="lockModal" aria-hidden="true">
+      <div class="modal-card">
+        <p class="modal-tag">Access control</p>
+        <h3 id="lockTitle">Lock this user?</h3>
+        <p class="modal-text" id="lockDescription">
+          Locking prevents new logins without deactivating the account or removing room membership.
+        </p>
+        <div class="modal-warning" id="lockTarget"></div>
+        <label>
+          Type the full user ID to confirm
+          <input type="text" id="lockConfirm" placeholder="@user:example.com" />
+        </label>
+        <div class="modal-actions">
+          <button class="btn ghost" id="lockCancel">Cancel</button>
+          <button class="btn primary" id="lockConfirmBtn" disabled>Lock user</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal hidden" id="infoModal" aria-hidden="true">
+      <div class="modal-card">
+        <p class="modal-tag">User info</p>
+        <h3>Account details</h3>
+        <div class="info-list">
+          <div class="info-item">
+            <span>MXID</span>
+            <strong id="infoMxid">-</strong>
+          </div>
+          <div class="info-item">
+            <span>3PID</span>
+            <strong id="infoThreepid">-</strong>
+          </div>
+          <div class="info-item">
+            <span>Signup email</span>
+            <strong id="infoEmail">-</strong>
+          </div>
+          <div class="info-item">
+            <span>Last active</span>
+            <strong id="infoLastActive">-</strong>
+          </div>
+          <div class="info-item">
+            <span>Devices</span>
+            <strong id="infoDevices">-</strong>
+          </div>
+          <div class="info-item">
+            <span>Rooms</span>
+            <strong id="infoRooms">-</strong>
+          </div>
+        </div>
+        <div class="modal-actions">
+          <button class="btn ghost" id="infoClose">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
+
+

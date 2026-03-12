@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Morpheus Manage - Rooms</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="rail">
+        <a class="rail-logo" href="/" aria-label="Morpheus Manage home">MM</a>
+        <nav class="rail-nav" aria-label="Primary navigation">
+          <a class="rail-link" href="/users.html" data-label="Users" aria-label="Users">
+            <span class="rail-icon"><img src="/icons/people-outline.svg" alt="" /></span>
+            <span class="rail-text">Users</span>
+          </a>
+          <a class="rail-link active" href="/rooms.html" data-label="Rooms" aria-label="Rooms">
+            <span class="rail-icon"><img src="/icons/message-circle-outline.svg" alt="" /></span>
+            <span class="rail-text">Rooms</span>
+          </a>
+          <a class="rail-link" href="/media.html" data-label="Media" aria-label="Media">
+            <span class="rail-icon"><img src="/icons/image-outline.svg" alt="" /></span>
+            <span class="rail-text">Media</span>
+          </a>
+        </nav>
+      </aside>
+
+      <aside class="side-pane">
+        <a class="brand-link" href="/">Morpheus Manage</a>
+        <p class="pane-subtitle">Room administration workspace</p>
+
+        <div class="pane-section">
+          <h2>Rooms</h2>
+          <a class="pane-link active" href="#roomsCard">All rooms</a>
+          <a class="pane-link" href="#roomsCard">Moderation queue</a>
+          <a class="pane-link" href="#roomsCard">Room details</a>
+          <a class="pane-link" href="#roomsCard">Policies</a>
+        </div>
+
+        <p class="pane-note">Default sort is latest activity first to surface active rooms quickly.</p>
+
+        <div class="pane-footer">Open a room from the list to run moderation actions.</div>
+      </aside>
+
+      <main class="workspace">
+        <header class="workspace-header">
+          <div>
+            <p class="page-eyebrow">Morpheus Manage</p>
+            <p class="page-breadcrumb">Rooms / All rooms</p>
+            <h1 class="page-title">Room management</h1>
+            <p class="page-subtitle">Browse rooms, member counts, homeserver domains, and recent activity.</p>
+          </div>
+          <div class="status" id="roomStatus">Loading...</div>
+        </header>
+
+        <div class="workspace-body">
+          <section class="card" id="roomsCard">
+            <div class="card-header">
+              <div>
+                <h2>Rooms</h2>
+                <p>Sorted by name, homeserver, users, or last activity.</p>
+              </div>
+              <div class="pager">
+                <button class="btn ghost" id="roomPrev">Prev</button>
+                <span id="roomPageLabel">Page 1</span>
+                <button class="btn ghost" id="roomNext">Next</button>
+              </div>
+            </div>
+            <div class="list-controls">
+              <label>
+                Page size
+                <select id="roomPageSize">
+                  <option value="10" selected>10</option>
+                  <option value="25">25</option>
+                  <option value="50">50</option>
+                  <option value="100">100</option>
+                </select>
+              </label>
+              <button class="btn" id="roomRefresh">Refresh</button>
+            </div>
+            <div class="table rooms-table" id="roomsTable"></div>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <div class="modal hidden" id="roomMembersModal" aria-hidden="true">
+      <div class="modal-card">
+        <p class="modal-tag">Room members</p>
+        <h3 id="roomMembersTitle">Members</h3>
+        <label>
+          Search
+          <input type="text" id="roomMembersSearch" placeholder="Filter members" />
+        </label>
+        <div class="details-list" id="roomMembersList"></div>
+        <div class="modal-actions">
+          <button class="btn ghost" id="roomMembersClose">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="/rooms.js"></script>
+  </body>
+</html>
+
+

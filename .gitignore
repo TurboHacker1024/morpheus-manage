@@ -1,7 +1,9 @@
 # Environment variables (secrets)
 
 .env
-.env.*
+.env.local
+.env.*.local
+!.env.example
 
 # Node dependencies
 

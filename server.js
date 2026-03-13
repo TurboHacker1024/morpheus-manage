@@ -19,6 +19,12 @@ if (!SYNAPSE_BASE_URL || !SYNAPSE_ADMIN_TOKEN || !SYNAPSE_SERVER_NAME) {
 
 app.use(express.json({ limit: '1mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
+app.use('/api', (req, res, next) => {
+  res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.set('Pragma', 'no-cache');
+  res.set('Expires', '0');
+  next();
+});
 
 const USERS_FETCH_LIMIT = 100;
 const ROOMS_FETCH_LIMIT = 100;
@@ -577,6 +583,96 @@ app.get('/api/users/:userId/devices', async (req, res, next) => {
       `/_synapse/admin/v2/users/${encodeURIComponent(userId)}/devices`
     );
     res.json(data || {});
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/users/:userId/revoke_session', async (req, res, next) => {
+  try {
+    const userId = req.params.userId;
+    const deviceId = req.body?.device_id;
+
+    if (!deviceId) {
+      return res.status(400).json({ error: 'device_id is required.' });
+    }
+
+    await synapseRequest(
+      'POST',
+      `/_synapse/admin/v2/users/${encodeURIComponent(userId)}/delete_devices`,
+      { devices: [deviceId] }
+    );
+
+    const after = await synapseRequest(
+      'GET',
+      `/_synapse/admin/v2/users/${encodeURIComponent(userId)}/devices`
+    );
+    const remaining = Array.isArray(after?.devices) ? after.devices : [];
+    const stillPresent = remaining.some((device) => device?.device_id === deviceId);
+
+    res.json({
+      ok: !stillPresent,
+      user_id: userId,
+      device_id: deviceId,
+      still_present: stillPresent
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/users/:userId/revoke_all_sessions', async (req, res, next) => {
+  try {
+    const userId = req.params.userId;
+    const devicesData = await synapseRequest(
+      'GET',
+      `/_synapse/admin/v2/users/${encodeURIComponent(userId)}/devices`
+    );
+    const devices = Array.isArray(devicesData?.devices) ? devicesData.devices : [];
+    const deviceIds = devices.map((device) => device?.device_id).filter(Boolean);
+
+    const results = await Promise.allSettled(
+      deviceIds.map((deviceId) =>
+        synapseRequest(
+          'POST',
+          `/_synapse/admin/v2/users/${encodeURIComponent(userId)}/delete_devices`,
+          { devices: [deviceId] }
+        )
+      )
+    );
+
+    const failed = [];
+    results.forEach((result, index) => {
+      if (result.status === 'rejected') {
+        failed.push({
+          device_id: deviceIds[index],
+          error: result.reason?.message || 'Failed to revoke'
+        });
+      }
+    });
+
+    const after = await synapseRequest(
+      'GET',
+      `/_synapse/admin/v2/users/${encodeURIComponent(userId)}/devices`
+    );
+    const remainingDevices = Array.isArray(after?.devices) ? after.devices : [];
+    const remainingSet = new Set(remainingDevices.map((device) => device?.device_id).filter(Boolean));
+    const unresolved = deviceIds.filter((id) => remainingSet.has(id));
+
+    res.json({
+      ok: failed.length === 0 && unresolved.length === 0,
+      user_id: userId,
+      requested_count: deviceIds.length,
+      revoked_count: deviceIds.length - failed.length - unresolved.length,
+      failed_count: failed.length + unresolved.length,
+      failures: [
+        ...failed,
+        ...unresolved.map((deviceId) => ({
+          device_id: deviceId,
+          error: 'Device still present after revoke request'
+        }))
+      ]
+    });
   } catch (err) {
     next(err);
   }

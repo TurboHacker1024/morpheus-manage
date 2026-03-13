@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Morpheus Manage - Activity and audits</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="rail">
+        <a class="rail-logo" href="/" aria-label="Morpheus Manage home">MM</a>
+        <nav class="rail-nav" aria-label="Primary navigation">
+          <a class="rail-link active" href="/users.html" data-label="Users" aria-label="Users">
+            <span class="rail-icon"><img src="/icons/people-outline.svg" alt="" /></span>
+            <span class="rail-text">Users</span>
+          </a>
+          <a class="rail-link" href="/rooms.html" data-label="Rooms" aria-label="Rooms">
+            <span class="rail-icon"><img src="/icons/message-circle-outline.svg" alt="" /></span>
+            <span class="rail-text">Rooms</span>
+          </a>
+          <a class="rail-link" href="/media.html" data-label="Media" aria-label="Media">
+            <span class="rail-icon"><img src="/icons/image-outline.svg" alt="" /></span>
+            <span class="rail-text">Media</span>
+          </a>
+        </nav>
+      </aside>
+
+      <aside class="side-pane">
+        <a class="brand-link" href="/">Morpheus Manage</a>
+        <p class="pane-subtitle">User administration workspace</p>
+
+        <div class="pane-section">
+          <h2>Users</h2>
+          <a class="pane-link" href="/users.html#listCard">Directory</a>
+          <a class="pane-link" href="/users.html#createCard">Create account</a>
+          <a class="pane-link" href="/users.html#listCard">Access controls</a>
+          <a class="pane-link active" href="/audits.html">Activity and audits</a>
+        </div>
+
+        <p class="pane-note">This view is focused on session review and user activity checks.</p>
+
+        <div class="pane-footer">Connected server: <span id="serverName">...</span></div>
+      </aside>
+
+      <main class="workspace">
+        <header class="workspace-header">
+          <div>
+            <p class="page-eyebrow">Morpheus Manage</p>
+            <p class="page-breadcrumb">Users / Activity and audits</p>
+            <h1 class="page-title">Activity and audits</h1>
+            <p class="page-subtitle">
+              Review users and jump directly to session details for <span id="serverNameInline">...</span>.
+            </p>
+          </div>
+          <div class="status" id="status">Loading users...</div>
+        </header>
+
+        <div class="workspace-body">
+          <section class="grid">
+            <div class="card" id="listCard">
+              <div class="card-header">
+                <div>
+                  <h2>Users</h2>
+                  <p>Simplified directory for session audits.</p>
+                </div>
+                <div class="pager">
+                  <button class="btn ghost" id="prevBtn">Prev</button>
+                  <span id="pageLabel">Page 1</span>
+                  <button class="btn ghost" id="nextBtn">Next</button>
+                </div>
+              </div>
+              <div class="list-controls">
+                <label>
+                  Page size
+                  <select id="pageSize">
+                    <option value="10" selected>10</option>
+                    <option value="25">25</option>
+                    <option value="50">50</option>
+                    <option value="100">100</option>
+                  </select>
+                </label>
+                <div class="toggle">
+                  <span class="toggle-label" id="showDisabledLabel">Hide disabled users</span>
+                  <button
+                    class="toggle-switch"
+                    type="button"
+                    id="showDisabledToggle"
+                    data-state="off"
+                    aria-pressed="false"
+                  >
+                    <span class="toggle-thumb"></span>
+                  </button>
+                </div>
+                <button class="btn" id="refreshBtn">Refresh</button>
+              </div>
+              <div class="table" id="usersTable"></div>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <div class="modal hidden" id="sessionsModal" aria-hidden="true">
+      <div class="modal-card sessions-modal-card">
+        <p class="modal-tag">Account sessions</p>
+        <h3 id="sessionsTitle">Sessions</h3>
+        <p class="modal-text" id="sessionsSubtitle">Review active device sessions and revoke access.</p>
+        <div class="modal-warning" id="sessionsWarning"></div>
+        <div class="modal-actions sessions-modal-actions">
+          <button class="btn ghost" id="sessionsRefresh" type="button">Refresh sessions</button>
+          <button class="btn ghost danger-outline" id="revokeAllBtn" type="button">Revoke all sessions</button>
+          <button class="btn ghost" id="sessionsClose" type="button">Close</button>
+        </div>
+        <div class="session-confirm-panel hidden" id="revokeAllConfirmPanel">
+          <p class="modal-tag">Emergency confirmation</p>
+          <label>
+            Type REVOKE
+            <input type="text" id="revokeAllPhrase" placeholder="REVOKE" />
+          </label>
+          <label>
+            Type the full user ID
+            <input type="text" id="revokeAllUserConfirm" placeholder="@user:example.com" />
+          </label>
+          <div class="modal-actions">
+            <button class="btn ghost" id="revokeAllCancel" type="button">Cancel</button>
+            <button class="btn primary" id="revokeAllConfirmBtn" type="button" disabled>Confirm revoke all</button>
+          </div>
+        </div>
+        <div class="details-list sessions-list" id="sessionsList"></div>
+      </div>
+    </div>
+
+    <script src="/audits.js"></script>
+  </body>
+</html>

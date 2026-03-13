@@ -480,6 +480,16 @@ select {
   background: rgba(255, 255, 255, 0.04);
 }
 
+.btn.ghost.danger-outline {
+  border-color: rgba(255, 109, 122, 0.45);
+  color: var(--danger);
+}
+
+.btn.ghost.danger-outline:hover {
+  border-color: rgba(255, 109, 122, 0.7);
+  background: rgba(255, 109, 122, 0.12);
+}
+
 .form {
   display: grid;
   gap: 10px;
@@ -926,6 +936,42 @@ select {
   border-radius: 4px;
   padding: 14px;
   box-shadow: 0 34px 60px rgba(0, 0, 0, 0.55);
+}
+
+.sessions-modal-card {
+  width: min(860px, 100%);
+}
+
+.sessions-modal-actions {
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.sessions-list {
+  max-height: 54vh;
+}
+
+.session-confirm-panel {
+  display: grid;
+  gap: 8px;
+  border: 1px solid rgba(255, 109, 122, 0.45);
+  background: rgba(88, 22, 31, 0.22);
+  border-radius: 4px;
+  padding: 10px;
+}
+
+.session-item {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.session-main {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
 }
 
 .modal-tag {

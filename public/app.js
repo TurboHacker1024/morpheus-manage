@@ -159,6 +159,8 @@ function renderUsers(users) {
     }
 
     const userCell = document.createElement('div');
+    userCell.className = 'user-cell';
+    const avatar = buildAvatarElement(user);
     const userMeta = document.createElement('div');
     userMeta.className = 'user-meta';
     const displayName = document.createElement('div');
@@ -169,6 +171,7 @@ function renderUsers(users) {
     userId.textContent = user.name;
     userMeta.appendChild(displayName);
     userMeta.appendChild(userId);
+    userCell.appendChild(avatar);
     userCell.appendChild(userMeta);
 
     const adminCell = document.createElement('div');
@@ -291,6 +294,60 @@ function renderUsers(users) {
       });
     });
   }
+}
+
+function getUserFallback(user) {
+  const raw = (user.displayname || user.name || '').trim();
+  if (!raw) return '?';
+  const normalized = raw.startsWith('@') ? raw.slice(1) : raw;
+  return normalized.charAt(0).toUpperCase();
+}
+
+function getAvatarSrc(user) {
+  const avatarUrl = user?.avatar_url || '';
+  if (!avatarUrl) return null;
+
+  if (avatarUrl.startsWith('mxc://')) {
+    return `/api/media/thumbnail?mxc=${encodeURIComponent(avatarUrl)}&width=48&height=48&method=crop`;
+  }
+
+  if (avatarUrl.startsWith('http://') || avatarUrl.startsWith('https://')) {
+    return avatarUrl;
+  }
+
+  return null;
+}
+
+function buildAvatarElement(user) {
+  const avatar = document.createElement('div');
+  avatar.className = 'user-avatar';
+  const fallback = getUserFallback(user);
+  avatar.textContent = fallback;
+
+  const src = getAvatarSrc(user);
+  if (!src) {
+    return avatar;
+  }
+
+  const image = document.createElement('img');
+  image.alt = `${user.displayname || user.name || 'User'} avatar`;
+  image.loading = 'lazy';
+  image.decoding = 'async';
+  image.referrerPolicy = 'no-referrer';
+
+  image.addEventListener('load', () => {
+    avatar.classList.add('has-image');
+    avatar.textContent = '';
+    avatar.appendChild(image);
+  });
+
+  image.addEventListener('error', () => {
+    avatar.classList.remove('has-image');
+  });
+
+  image.src = src;
+
+  return avatar;
 }
 
 async function loadConfig() {

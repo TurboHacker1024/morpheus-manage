@@ -383,6 +383,66 @@ app.get('/api/config', (req, res) => {
   });
 });
 
+app.get('/api/media/thumbnail', async (req, res, next) => {
+  try {
+    const mxc = String(req.query?.mxc || '');
+    const width = Number(req.query?.width || 48);
+    const height = Number(req.query?.height || 48);
+    const method = String(req.query?.method || 'crop');
+
+    if (!mxc.startsWith('mxc://')) {
+      return res.status(400).json({ error: 'mxc query parameter is required (mxc://server/mediaId).' });
+    }
+
+    const mxcPath = mxc.slice('mxc://'.length);
+    const slashIndex = mxcPath.indexOf('/');
+    if (slashIndex <= 0) {
+      return res.status(400).json({ error: 'Invalid MXC URI.' });
+    }
+
+    const mediaServer = mxcPath.slice(0, slashIndex);
+    const mediaId = mxcPath.slice(slashIndex + 1);
+
+    const endpoint = `/_matrix/media/v3/thumbnail/${encodeURIComponent(mediaServer)}/${encodeURIComponent(mediaId)}`;
+    const url = buildSynapseUrl(endpoint, {
+      width: Math.max(1, width),
+      height: Math.max(1, height),
+      method: method === 'scale' ? 'scale' : 'crop'
+    });
+
+    const upstream = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${SYNAPSE_ADMIN_TOKEN}`
+      }
+    });
+
+    if (!upstream.ok) {
+      const text = await upstream.text();
+      let details = null;
+      try {
+        details = JSON.parse(text);
+      } catch (err) {
+        details = text || null;
+      }
+      return res.status(upstream.status).json({
+        error: 'Unable to fetch media thumbnail.',
+        details
+      });
+    }
+
+    const contentType = upstream.headers.get('content-type') || 'image/jpeg';
+    const cacheControl = upstream.headers.get('cache-control') || 'public, max-age=3600';
+    const arrayBuffer = await upstream.arrayBuffer();
+    const body = Buffer.from(arrayBuffer);
+
+    res.set('Content-Type', contentType);
+    res.set('Cache-Control', cacheControl);
+    res.send(body);
+  } catch (err) {
+    next(err);
+  }
+});
+
 app.get('/api/users', async (req, res, next) => {
   try {
     const {

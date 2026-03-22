@@ -1,0 +1,38 @@
+services:
+  morpheus-manage:
+    build:
+      context: .
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 4173
+      SYNAPSE_BASE_URL: https://your-synapse-domain.example
+      SYNAPSE_SERVER_NAME: your-synapse-domain.example
+      SYNAPSE_ADMIN_TOKEN_FILE: /run/secrets/morpheus_admin_token
+    secrets:
+      - morpheus_admin_token
+    volumes:
+      - ./cache:/app/cache
+    ports:
+      - "127.0.0.1:4173:4173"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:4173/healthz').then((r)=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+
+secrets:
+  morpheus_admin_token:
+    file: ./secrets/morpheus_admin_token.txt

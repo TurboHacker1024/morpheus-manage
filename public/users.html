@@ -39,8 +39,6 @@
         <div class="pane-section">
           <h2>Users</h2>
           <a class="pane-link active" href="#listCard">Directory</a>
-          <a class="pane-link" href="#createCard">Create account</a>
-          <a class="pane-link" href="#listCard">Access controls</a>
           <a class="pane-link" href="/audits.html">Activity and audits</a>
         </div>
 
@@ -78,6 +76,10 @@
                 </div>
               </div>
               <div class="list-controls">
+                <label class="search-field">
+                  Search users
+                  <input type="search" id="userSearch" placeholder="Display name, @mxid, localpart, status..." />
+                </label>
                 <label>
                   Page size
                   <select id="pageSize">
@@ -124,9 +126,9 @@
                   Display name
                   <input type="text" id="displayname" placeholder="Alice Example" />
                 </label>
-                <label class="checkbox">
+                <label class="checkbox form-checkbox">
                   <input type="checkbox" id="isAdmin" />
-                  Admin privileges
+                  <span>Admin privileges</span>
                 </label>
                 <button class="btn primary" type="submit">Create user</button>
                 <p class="form-note" id="createNote"></p>

@@ -32,11 +32,33 @@ const ROOM_ACTIVITY_TTL_MS = 15 * 60 * 1000;
 const ROOM_ACTIVITY_STALE_MS = 60 * 60 * 1000;
 const ROOM_ACTIVITY_BATCH = 10;
 const ROOM_ACTIVITY_CACHE_FILE = path.join(__dirname, 'cache', 'rooms.json');
+const ACTION_LOG_FILE = path.join(__dirname, 'cache', 'actions.json');
+const ACTION_LOG_MAX_ENTRIES = Math.max(200, Number(process.env.ACTION_LOG_MAX_ENTRIES || 5000));
+const ACTION_PERSIST_DEBOUNCE_MS = 250;
+const SYNAPSE_HEALTH_CACHE_TTL_MS = 15 * 1000;
 
 let roomActivityCache = new Map();
 let roomCacheLoaded = false;
 let roomRefreshInProgress = false;
 let roomRefreshQueue = new Set();
+let actionLogEntries = [];
+let actionLogLoaded = false;
+let actionPersistTimer = null;
+let roomCachePersistedAt = null;
+let actionLogPersistedAt = null;
+let lastRoomsListFetchAt = null;
+let lastRoomsListFetchDurationMs = null;
+let lastRoomsListFetchError = null;
+let lastRoomRefreshStartedAt = null;
+let lastRoomRefreshFinishedAt = null;
+let lastRoomRefreshError = null;
+let synapseHealthSnapshot = {
+  checked_at: null,
+  ok: null,
+  latency_ms: null,
+  version: null,
+  error: null
+};
 
 function getLocalpart(userId) {
   if (!userId) return '';
@@ -52,6 +74,24 @@ function getDisplaySortKey(user) {
   }
   const localpart = getLocalpart(user.name || '');
   return localpart.toLowerCase();
+}
+
+function userMatchesSearch(user, query) {
+  const q = String(query || '').trim().toLowerCase();
+  if (!q) return true;
+
+  const haystack = [
+    user?.displayname || '',
+    user?.name || '',
+    getLocalpart(user?.name || ''),
+    user?.admin ? 'admin' : 'user',
+    user?.deactivated ? 'deactivated' : '',
+    user?.locked ? 'locked' : 'active'
+  ]
+    .join(' ')
+    .toLowerCase();
+
+  return haystack.includes(q);
 }
 
 function sortUsers(users, { key, dir }) {
@@ -111,6 +151,22 @@ function getRoomHomeserver(room) {
   return parts.length > 1 ? parts.slice(1).join(':') : '';
 }
 
+function roomMatchesSearch(room, query) {
+  const q = String(query || '').trim().toLowerCase();
+  if (!q) return true;
+
+  const haystack = [
+    getRoomName(room),
+    room?.room_id || '',
+    room?.canonical_alias || '',
+    getRoomHomeserver(room)
+  ]
+    .join(' ')
+    .toLowerCase();
+
+  return haystack.includes(q);
+}
+
 function getRoomLastActive(room) {
   return (
     room?.last_event_ts ??
@@ -163,6 +219,226 @@ function sortRooms(rooms, { key, dir }) {
   return sorted;
 }
 
+function parseMxcUri(mxc) {
+  const value = String(mxc || '');
+  if (!value.startsWith('mxc://')) {
+    return null;
+  }
+  const mxcPath = value.slice('mxc://'.length);
+  const slashIndex = mxcPath.indexOf('/');
+  if (slashIndex <= 0) {
+    return null;
+  }
+  return {
+    server: mxcPath.slice(0, slashIndex),
+    mediaId: mxcPath.slice(slashIndex + 1)
+  };
+}
+
+function buildAvatarThumbnailPath(mxc, size = 48) {
+  const parsed = parseMxcUri(mxc);
+  if (!parsed) return null;
+  const width = Math.max(1, Number(size) || 48);
+  const height = width;
+  return `/api/media/thumbnail?mxc=${encodeURIComponent(mxc)}&width=${width}&height=${height}&method=crop`;
+}
+
+function buildAvatarDownloadPath(mxc) {
+  const parsed = parseMxcUri(mxc);
+  if (!parsed) return null;
+  return `/api/media/download?mxc=${encodeURIComponent(mxc)}`;
+}
+
+function createActionId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function getClientIp(req) {
+  const forwarded = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  return forwarded || req.ip || req.socket?.remoteAddress || 'unknown';
+}
+
+function truncateString(value, max = 220) {
+  if (typeof value !== 'string') return value;
+  if (value.length <= max) return value;
+  return `${value.slice(0, max)}...`;
+}
+
+function sanitizeForLog(value, depth = 0) {
+  if (value === null || value === undefined) {
+    return value;
+  }
+
+  if (depth > 4) {
+    return '[max-depth]';
+  }
+
+  if (typeof value === 'string') {
+    return truncateString(value);
+  }
+
+  if (typeof value === 'number' || typeof value === 'boolean') {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    const limited = value.slice(0, 25).map((item) => sanitizeForLog(item, depth + 1));
+    if (value.length > 25) {
+      limited.push(`[+${value.length - 25} more]`);
+    }
+    return limited;
+  }
+
+  if (typeof value === 'object') {
+    const output = {};
+    const entries = Object.entries(value).slice(0, 50);
+    for (const [key, nestedValue] of entries) {
+      if (/(password|token|secret|access_token|authorization|new_password)/i.test(key)) {
+        output[key] = '[redacted]';
+      } else {
+        output[key] = sanitizeForLog(nestedValue, depth + 1);
+      }
+    }
+    if (Object.keys(value).length > 50) {
+      output._truncated = `[+${Object.keys(value).length - 50} more keys]`;
+    }
+    return output;
+  }
+
+  return String(value);
+}
+
+function serializeErrorForLog(err) {
+  if (!err) return null;
+  return {
+    message: truncateString(err.message || 'Unknown error'),
+    status: err.status || null,
+    details: sanitizeForLog(err.data || null)
+  };
+}
+
+function loadActionLog() {
+  if (actionLogLoaded) return;
+  actionLogLoaded = true;
+  try {
+    if (!fs.existsSync(ACTION_LOG_FILE)) {
+      actionLogEntries = [];
+      return;
+    }
+    const raw = fs.readFileSync(ACTION_LOG_FILE, 'utf8');
+    const parsed = JSON.parse(raw);
+    const entries = Array.isArray(parsed?.entries) ? parsed.entries : [];
+    actionLogEntries = entries.slice(0, ACTION_LOG_MAX_ENTRIES);
+  } catch (err) {
+    console.warn('Failed to load action log cache', err.message);
+    actionLogEntries = [];
+  }
+}
+
+function persistActionLog() {
+  try {
+    const dir = path.dirname(ACTION_LOG_FILE);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    const payload = {
+      updated_at: Date.now(),
+      entries: actionLogEntries
+    };
+    fs.writeFileSync(ACTION_LOG_FILE, JSON.stringify(payload, null, 2), 'utf8');
+    actionLogPersistedAt = Date.now();
+  } catch (err) {
+    console.warn('Failed to persist action log cache', err.message);
+  }
+}
+
+function scheduleActionPersist() {
+  if (actionPersistTimer) return;
+  actionPersistTimer = setTimeout(() => {
+    actionPersistTimer = null;
+    persistActionLog();
+  }, ACTION_PERSIST_DEBOUNCE_MS);
+}
+
+function logAdminAction({
+  req = null,
+  action,
+  title,
+  module = 'system',
+  risk = 'safe',
+  status = 'success',
+  targetType = null,
+  targetId = null,
+  request = null,
+  result = null,
+  error = null,
+  startedAt = null,
+  httpStatus = null
+}) {
+  if (!action || !title) return;
+  loadActionLog();
+
+  const now = Date.now();
+  const durationMs = typeof startedAt === 'number' ? Math.max(0, now - startedAt) : null;
+
+  const entry = {
+    id: createActionId(),
+    at: new Date(now).toISOString(),
+    ts: now,
+    action,
+    title,
+    module,
+    risk,
+    status,
+    duration_ms: durationMs,
+    target: targetType || targetId ? { type: targetType, id: targetId } : null,
+    actor: req
+      ? {
+          ip: getClientIp(req),
+          user_agent: truncateString(req.get('user-agent') || 'Unknown', 120)
+        }
+      : {
+          ip: 'system',
+          user_agent: 'server'
+        },
+    http: req
+      ? {
+          method: req.method,
+          path: req.path,
+          status_code: httpStatus || (status === 'error' ? error?.status || 500 : 200)
+        }
+      : null,
+    details: {
+      request: sanitizeForLog(request),
+      result: sanitizeForLog(result),
+      error: serializeErrorForLog(error)
+    }
+  };
+
+  actionLogEntries.unshift(entry);
+  if (actionLogEntries.length > ACTION_LOG_MAX_ENTRIES) {
+    actionLogEntries = actionLogEntries.slice(0, ACTION_LOG_MAX_ENTRIES);
+  }
+  scheduleActionPersist();
+}
+
+function getActionEntryTitle(updateBody) {
+  const keys = Object.keys(updateBody || {});
+  if (keys.length === 1 && keys[0] === 'displayname') {
+    return 'Rename user';
+  }
+  if (keys.length === 1 && keys[0] === 'password') {
+    return 'Reset user password';
+  }
+  if (keys.length === 1 && keys[0] === 'admin') {
+    return updateBody.admin ? 'Grant admin privileges' : 'Remove admin privileges';
+  }
+  if (keys.length === 1 && keys[0] === 'locked') {
+    return updateBody.locked ? 'Lock user' : 'Unlock user';
+  }
+  return 'Update user';
+}
+
 function loadRoomCache() {
   if (roomCacheLoaded) return;
   roomCacheLoaded = true;
@@ -201,6 +477,7 @@ function persistRoomCache() {
       rooms
     };
     fs.writeFileSync(ROOM_ACTIVITY_CACHE_FILE, JSON.stringify(payload, null, 2), 'utf8');
+    roomCachePersistedAt = Date.now();
   } catch (err) {
     console.warn('Failed to persist room cache', err.message);
   }
@@ -224,6 +501,8 @@ function queueRoomRefresh(roomIds) {
 async function processRoomRefreshQueue() {
   if (roomRefreshInProgress) return;
   roomRefreshInProgress = true;
+  lastRoomRefreshStartedAt = Date.now();
+  lastRoomRefreshError = null;
   try {
     while (roomRefreshQueue.size) {
       const batch = Array.from(roomRefreshQueue).slice(0, ROOM_ACTIVITY_BATCH);
@@ -238,6 +517,11 @@ async function processRoomRefreshQueue() {
       );
       persistRoomCache();
     }
+    lastRoomRefreshFinishedAt = Date.now();
+  } catch (err) {
+    lastRoomRefreshError = err.message || 'Room refresh queue failed';
+    lastRoomRefreshFinishedAt = Date.now();
+    console.warn('Room refresh queue failed', err.message);
   } finally {
     roomRefreshInProgress = false;
   }
@@ -376,11 +660,262 @@ async function synapseRequest(method, endpoint, body, query) {
   return data;
 }
 
+function toTimestamp(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return null;
+  return numeric;
+}
+
+function summarizeActionSet(entries) {
+  const summary = {
+    total: entries.length,
+    success: 0,
+    error: 0,
+    safe: 0,
+    guarded: 0,
+    destructive: 0,
+    module_counts: {}
+  };
+
+  entries.forEach((entry) => {
+    if (entry.status === 'error') {
+      summary.error += 1;
+    } else {
+      summary.success += 1;
+    }
+
+    if (entry.risk === 'destructive') {
+      summary.destructive += 1;
+    } else if (entry.risk === 'guarded') {
+      summary.guarded += 1;
+    } else {
+      summary.safe += 1;
+    }
+
+    const moduleName = entry.module || 'other';
+    summary.module_counts[moduleName] = (summary.module_counts[moduleName] || 0) + 1;
+  });
+
+  return summary;
+}
+
+async function getSynapseHealthSnapshot(force = false) {
+  const now = Date.now();
+  const isFresh =
+    synapseHealthSnapshot.checked_at &&
+    now - Number(synapseHealthSnapshot.checked_at) < SYNAPSE_HEALTH_CACHE_TTL_MS;
+
+  if (!force && isFresh) {
+    return synapseHealthSnapshot;
+  }
+
+  const startedAt = Date.now();
+  try {
+    const data = await synapseRequest('GET', '/_synapse/admin/v1/server_version');
+    synapseHealthSnapshot = {
+      checked_at: Date.now(),
+      ok: true,
+      latency_ms: Date.now() - startedAt,
+      version: data?.server_version || null,
+      error: null
+    };
+  } catch (err) {
+    synapseHealthSnapshot = {
+      checked_at: Date.now(),
+      ok: false,
+      latency_ms: Date.now() - startedAt,
+      version: null,
+      error: err.message || 'Synapse health check failed'
+    };
+  }
+
+  return synapseHealthSnapshot;
+}
+
+function getFileStats(filePath) {
+  try {
+    if (!fs.existsSync(filePath)) {
+      return {
+        exists: false,
+        size_bytes: 0,
+        mtime_ms: null
+      };
+    }
+    const stat = fs.statSync(filePath);
+    return {
+      exists: true,
+      size_bytes: Number(stat.size || 0),
+      mtime_ms: stat.mtimeMs ? Math.round(stat.mtimeMs) : null
+    };
+  } catch (err) {
+    return {
+      exists: false,
+      size_bytes: 0,
+      mtime_ms: null
+    };
+  }
+}
+
 app.get('/api/config', (req, res) => {
   res.json({
     server_name: SYNAPSE_SERVER_NAME,
     base_url: SYNAPSE_BASE_URL
   });
+});
+
+app.get('/api/actions', (req, res) => {
+  loadActionLog();
+  const limit = Math.max(1, Math.min(200, Number(req.query.limit || 50)));
+  const offset = Math.max(0, Number(req.query.offset || 0));
+  const moduleFilter = String(req.query.module || '').trim().toLowerCase();
+  const statusFilter = String(req.query.status || '').trim().toLowerCase();
+  const riskFilter = String(req.query.risk || '').trim().toLowerCase();
+  const actionFilter = String(req.query.action || '').trim().toLowerCase();
+  const search = String(req.query.q || '').trim().toLowerCase();
+  const since = toTimestamp(req.query.since);
+  const until = toTimestamp(req.query.until);
+
+  let filtered = [...actionLogEntries];
+
+  if (moduleFilter && moduleFilter !== 'all') {
+    filtered = filtered.filter((entry) => String(entry.module || '').toLowerCase() === moduleFilter);
+  }
+
+  if (statusFilter && statusFilter !== 'all') {
+    filtered = filtered.filter((entry) => String(entry.status || '').toLowerCase() === statusFilter);
+  }
+
+  if (riskFilter && riskFilter !== 'all') {
+    filtered = filtered.filter((entry) => String(entry.risk || '').toLowerCase() === riskFilter);
+  }
+
+  if (actionFilter && actionFilter !== 'all') {
+    filtered = filtered.filter((entry) => String(entry.action || '').toLowerCase() === actionFilter);
+  }
+
+  if (since) {
+    filtered = filtered.filter((entry) => Number(entry.ts || 0) >= since);
+  }
+
+  if (until) {
+    filtered = filtered.filter((entry) => Number(entry.ts || 0) <= until);
+  }
+
+  if (search) {
+    filtered = filtered.filter((entry) => {
+      const haystack = [
+        entry.title,
+        entry.action,
+        entry.module,
+        entry?.target?.id,
+        entry?.target?.type,
+        entry?.actor?.ip,
+        entry?.details?.request ? JSON.stringify(entry.details.request) : null,
+        entry?.details?.error?.message
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      return haystack.includes(search);
+    });
+  }
+
+  const page = filtered.slice(offset, offset + limit);
+  const nextOffset = offset + limit < filtered.length ? offset + limit : null;
+
+  res.json({
+    actions: page,
+    total: filtered.length,
+    next_offset: nextOffset,
+    filtered_summary: summarizeActionSet(filtered),
+    global_summary: summarizeActionSet(actionLogEntries)
+  });
+});
+
+app.get('/api/system/status', async (req, res, next) => {
+  try {
+    loadRoomCache();
+    loadActionLog();
+
+    const now = Date.now();
+    const forceHealth = String(req.query.force || 'false') === 'true';
+    const health = await getSynapseHealthSnapshot(forceHealth);
+
+    const roomEntries = Array.from(roomActivityCache.values());
+    let staleEntries = 0;
+    let ttlExpiredEntries = 0;
+    let oldestCachedAt = null;
+    let newestCachedAt = null;
+
+    roomEntries.forEach((entry) => {
+      const cachedAt = Number(entry?.cached_at || 0);
+      if (!cachedAt) return;
+      if (now - cachedAt > ROOM_ACTIVITY_STALE_MS) staleEntries += 1;
+      if (now - cachedAt > ROOM_ACTIVITY_TTL_MS) ttlExpiredEntries += 1;
+      if (!oldestCachedAt || cachedAt < oldestCachedAt) oldestCachedAt = cachedAt;
+      if (!newestCachedAt || cachedAt > newestCachedAt) newestCachedAt = cachedAt;
+    });
+
+    const latestAction = actionLogEntries[0] || null;
+    const latestErrorAction = actionLogEntries.find((entry) => entry?.status === 'error') || null;
+    const roomCacheFile = getFileStats(ROOM_ACTIVITY_CACHE_FILE);
+    const actionLogFile = getFileStats(ACTION_LOG_FILE);
+    const memory = process.memoryUsage();
+
+    res.json({
+      generated_at: now,
+      server: {
+        name: SYNAPSE_SERVER_NAME,
+        base_url: SYNAPSE_BASE_URL,
+        version: health.version || null,
+        api_healthy: Boolean(health.ok),
+        api_latency_ms: health.latency_ms,
+        health_checked_at: health.checked_at,
+        health_error: health.error || null
+      },
+      rooms_cache: {
+        entries: roomEntries.length,
+        stale_entries: staleEntries,
+        ttl_expired_entries: ttlExpiredEntries,
+        oldest_cached_at: oldestCachedAt,
+        newest_cached_at: newestCachedAt,
+        refresh_queue_depth: roomRefreshQueue.size,
+        refresh_in_progress: roomRefreshInProgress,
+        last_queue_refresh_started_at: lastRoomRefreshStartedAt,
+        last_queue_refresh_finished_at: lastRoomRefreshFinishedAt,
+        last_queue_refresh_error: lastRoomRefreshError,
+        last_rooms_fetch_at: lastRoomsListFetchAt,
+        last_rooms_fetch_duration_ms: lastRoomsListFetchDurationMs,
+        last_rooms_fetch_error: lastRoomsListFetchError,
+        last_cache_persist_at: roomCachePersistedAt,
+        cache_file: roomCacheFile
+      },
+      actions_log: {
+        entries: actionLogEntries.length,
+        max_entries: ACTION_LOG_MAX_ENTRIES,
+        last_action_at: latestAction?.ts || null,
+        last_action_title: latestAction?.title || null,
+        last_error_at: latestErrorAction?.ts || null,
+        last_error_title: latestErrorAction?.title || null,
+        last_error_message: latestErrorAction?.details?.error?.message || null,
+        last_cache_persist_at: actionLogPersistedAt,
+        cache_file: actionLogFile
+      },
+      process: {
+        pid: process.pid,
+        node_version: process.version,
+        uptime_seconds: Math.round(process.uptime()),
+        memory: {
+          rss_bytes: Number(memory?.rss || 0),
+          heap_used_bytes: Number(memory?.heapUsed || 0),
+          heap_total_bytes: Number(memory?.heapTotal || 0)
+        }
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
 });
 
 app.get('/api/media/thumbnail', async (req, res, next) => {
@@ -390,26 +925,85 @@ app.get('/api/media/thumbnail', async (req, res, next) => {
     const height = Number(req.query?.height || 48);
     const method = String(req.query?.method || 'crop');
 
-    if (!mxc.startsWith('mxc://')) {
+    const parsed = parseMxcUri(mxc);
+    if (!parsed) {
       return res.status(400).json({ error: 'mxc query parameter is required (mxc://server/mediaId).' });
     }
 
-    const mxcPath = mxc.slice('mxc://'.length);
-    const slashIndex = mxcPath.indexOf('/');
-    if (slashIndex <= 0) {
-      return res.status(400).json({ error: 'Invalid MXC URI.' });
-    }
-
-    const mediaServer = mxcPath.slice(0, slashIndex);
-    const mediaId = mxcPath.slice(slashIndex + 1);
-
-    const endpoint = `/_matrix/media/v3/thumbnail/${encodeURIComponent(mediaServer)}/${encodeURIComponent(mediaId)}`;
+    const endpoint = `/_matrix/media/v3/thumbnail/${encodeURIComponent(parsed.server)}/${encodeURIComponent(parsed.mediaId)}`;
     const url = buildSynapseUrl(endpoint, {
       width: Math.max(1, width),
       height: Math.max(1, height),
       method: method === 'scale' ? 'scale' : 'crop'
     });
 
+    const upstream = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${SYNAPSE_ADMIN_TOKEN}`
+      }
+    });
+
+    if (!upstream.ok) {
+      // Some deployments don't generate thumbnails for every media item.
+      // If thumbnail lookup fails, fall back to direct media download.
+      if (upstream.status === 404) {
+        const fallbackUrl = buildSynapseUrl(
+          `/_matrix/media/v3/download/${encodeURIComponent(parsed.server)}/${encodeURIComponent(parsed.mediaId)}`
+        );
+        const fallback = await fetch(fallbackUrl, {
+          headers: {
+            Authorization: `Bearer ${SYNAPSE_ADMIN_TOKEN}`
+          }
+        });
+        if (fallback.ok) {
+          const contentType = fallback.headers.get('content-type') || 'application/octet-stream';
+          const cacheControl = fallback.headers.get('cache-control') || 'public, max-age=3600';
+          const arrayBuffer = await fallback.arrayBuffer();
+          const body = Buffer.from(arrayBuffer);
+          res.set('Content-Type', contentType);
+          res.set('Cache-Control', cacheControl);
+          return res.send(body);
+        }
+      }
+
+      const text = await upstream.text();
+      let details = null;
+      try {
+        details = JSON.parse(text);
+      } catch (err) {
+        details = text || null;
+      }
+
+      return res.status(upstream.status).json({
+        error: 'Unable to fetch media thumbnail.',
+        details
+      });
+    }
+
+    const contentType = upstream.headers.get('content-type') || 'image/jpeg';
+    const cacheControl = upstream.headers.get('cache-control') || 'public, max-age=3600';
+    const arrayBuffer = await upstream.arrayBuffer();
+    const body = Buffer.from(arrayBuffer);
+
+    res.set('Content-Type', contentType);
+    res.set('Cache-Control', cacheControl);
+    res.send(body);
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get('/api/media/download', async (req, res, next) => {
+  try {
+    const mxc = String(req.query?.mxc || '');
+    const parsed = parseMxcUri(mxc);
+    if (!parsed) {
+      return res.status(400).json({ error: 'mxc query parameter is required (mxc://server/mediaId).' });
+    }
+
+    const url = buildSynapseUrl(
+      `/_matrix/media/v3/download/${encodeURIComponent(parsed.server)}/${encodeURIComponent(parsed.mediaId)}`
+    );
     const upstream = await fetch(url, {
       headers: {
         Authorization: `Bearer ${SYNAPSE_ADMIN_TOKEN}`
@@ -425,12 +1019,12 @@ app.get('/api/media/thumbnail', async (req, res, next) => {
         details = text || null;
       }
       return res.status(upstream.status).json({
-        error: 'Unable to fetch media thumbnail.',
+        error: 'Unable to fetch media download.',
         details
       });
     }
 
-    const contentType = upstream.headers.get('content-type') || 'image/jpeg';
+    const contentType = upstream.headers.get('content-type') || 'application/octet-stream';
     const cacheControl = upstream.headers.get('cache-control') || 'public, max-age=3600';
     const arrayBuffer = await upstream.arrayBuffer();
     const body = Buffer.from(arrayBuffer);
@@ -451,7 +1045,8 @@ app.get('/api/users', async (req, res, next) => {
       guests = 'false',
       deactivated = 'false',
       order_by = 'name',
-      dir = 'f'
+      dir = 'f',
+      q = ''
     } = req.query;
 
     const pageSize = Math.max(1, Number(limit) || 25);
@@ -467,12 +1062,20 @@ app.get('/api/users', async (req, res, next) => {
       users = users.filter((user) => !user.deactivated);
     }
 
+    if (String(q).trim()) {
+      users = users.filter((user) => userMatchesSearch(user, q));
+    }
+
     const sorted = sortUsers(users, {
       key: String(order_by),
       dir: String(dir)
     });
 
-    const page = sorted.slice(offset, offset + pageSize);
+    const page = sorted.slice(offset, offset + pageSize).map((user) => ({
+      ...user,
+      avatar_thumbnail_url: buildAvatarThumbnailPath(user?.avatar_url, 48),
+      avatar_download_url: buildAvatarDownloadPath(user?.avatar_url)
+    }));
     const nextToken = offset + pageSize < sorted.length ? String(offset + pageSize) : null;
 
     res.json({
@@ -486,8 +1089,9 @@ app.get('/api/users', async (req, res, next) => {
 });
 
 app.get('/api/rooms', async (req, res, next) => {
+  const startedAt = Date.now();
   try {
-    const { from = '0', limit = '25', order_by = 'name', dir = 'f' } = req.query;
+    const { from = '0', limit = '25', order_by = 'name', dir = 'f', q = '' } = req.query;
     const pageSize = Math.max(1, Number(limit) || 25);
     const offset = Math.max(0, Number(from) || 0);
 
@@ -515,7 +1119,8 @@ app.get('/api/rooms', async (req, res, next) => {
     if (refreshNeeded.length) {
       queueRoomRefresh(refreshNeeded);
     }
-    const sorted = sortRooms(rooms, { key: String(order_by), dir: String(dir) });
+    const filteredRooms = String(q).trim() ? rooms.filter((room) => roomMatchesSearch(room, q)) : rooms;
+    const sorted = sortRooms(filteredRooms, { key: String(order_by), dir: String(dir) });
     const page = sorted.slice(offset, offset + pageSize);
     const nextToken = offset + pageSize < sorted.length ? String(offset + pageSize) : null;
 
@@ -524,17 +1129,41 @@ app.get('/api/rooms', async (req, res, next) => {
       next_token: nextToken,
       total: sorted.length
     });
+    lastRoomsListFetchAt = Date.now();
+    lastRoomsListFetchDurationMs = Date.now() - startedAt;
+    lastRoomsListFetchError = null;
   } catch (err) {
+    lastRoomsListFetchAt = Date.now();
+    lastRoomsListFetchDurationMs = Date.now() - startedAt;
+    lastRoomsListFetchError = err.message || 'Failed to load rooms list';
     next(err);
   }
 });
 
 app.post('/api/users', async (req, res, next) => {
+  const startedAt = Date.now();
   try {
     const { user_id, localpart, password, admin, displayname } = req.body || {};
     const resolvedUserId = user_id || (localpart ? `@${localpart}:${SYNAPSE_SERVER_NAME}` : null);
 
     if (!resolvedUserId) {
+      logAdminAction({
+        req,
+        action: 'user.create',
+        title: 'Create user',
+        module: 'users',
+        risk: 'guarded',
+        status: 'error',
+        targetType: 'user',
+        targetId: null,
+        request: {
+          has_user_id: Boolean(user_id),
+          has_localpart: Boolean(localpart)
+        },
+        error: { message: 'Provide user_id or localpart.', status: 400 },
+        startedAt,
+        httpStatus: 400
+      });
       return res.status(400).json({ error: 'Provide user_id or localpart.' });
     }
 
@@ -560,13 +1189,57 @@ app.post('/api/users', async (req, res, next) => {
       body
     );
 
+    logAdminAction({
+      req,
+      action: 'user.create',
+      title: 'Create user',
+      module: 'users',
+      risk: 'guarded',
+      status: 'success',
+      targetType: 'user',
+      targetId: resolvedUserId,
+      request: {
+        localpart: localpart || null,
+        admin: typeof admin === 'boolean' ? admin : null,
+        has_password: Boolean(password),
+        has_displayname: displayname !== undefined && displayname !== ''
+      },
+      result: {
+        user_id: data?.name || resolvedUserId,
+        admin: Boolean(data?.admin),
+        deactivated: Boolean(data?.deactivated)
+      },
+      startedAt
+    });
+
     res.json(data || { ok: true });
   } catch (err) {
+    const { user_id, localpart, password, admin, displayname } = req.body || {};
+    const resolvedUserId = user_id || (localpart ? `@${localpart}:${SYNAPSE_SERVER_NAME}` : null);
+    logAdminAction({
+      req,
+      action: 'user.create',
+      title: 'Create user',
+      module: 'users',
+      risk: 'guarded',
+      status: 'error',
+      targetType: 'user',
+      targetId: resolvedUserId,
+      request: {
+        localpart: localpart || null,
+        admin: typeof admin === 'boolean' ? admin : null,
+        has_password: Boolean(password),
+        has_displayname: displayname !== undefined && displayname !== ''
+      },
+      error: err,
+      startedAt
+    });
     next(err);
   }
 });
 
 app.post('/api/users/:userId/deactivate', async (req, res, next) => {
+  const startedAt = Date.now();
   try {
     const userId = req.params.userId;
     const erase = Boolean(req.body?.erase);
@@ -577,13 +1250,45 @@ app.post('/api/users/:userId/deactivate', async (req, res, next) => {
       { erase }
     );
 
+    logAdminAction({
+      req,
+      action: 'user.deactivate',
+      title: 'Deactivate user',
+      module: 'users',
+      risk: 'destructive',
+      status: 'success',
+      targetType: 'user',
+      targetId: userId,
+      request: { erase },
+      result: {
+        id_server_unbind_result: data?.id_server_unbind_result || null
+      },
+      startedAt
+    });
+
     res.json(data || { ok: true });
   } catch (err) {
+    logAdminAction({
+      req,
+      action: 'user.deactivate',
+      title: 'Deactivate user',
+      module: 'users',
+      risk: 'destructive',
+      status: 'error',
+      targetType: 'user',
+      targetId: req.params.userId,
+      request: {
+        erase: Boolean(req.body?.erase)
+      },
+      error: err,
+      startedAt
+    });
     next(err);
   }
 });
 
 app.post('/api/users/:userId/update', async (req, res, next) => {
+  const startedAt = Date.now();
   try {
     const userId = req.params.userId;
     const { displayname, password, admin, locked } = req.body || {};
@@ -607,6 +1312,25 @@ app.post('/api/users/:userId/update', async (req, res, next) => {
     }
 
     if (!Object.keys(body).length) {
+      logAdminAction({
+        req,
+        action: 'user.update',
+        title: 'Update user',
+        module: 'users',
+        risk: 'guarded',
+        status: 'error',
+        targetType: 'user',
+        targetId: userId,
+        request: {
+          has_displayname: displayname !== undefined,
+          has_password: Boolean(password),
+          admin: typeof admin === 'boolean' ? admin : null,
+          locked: typeof locked === 'boolean' ? locked : null
+        },
+        error: { message: 'No update fields provided.', status: 400 },
+        startedAt,
+        httpStatus: 400
+      });
       return res.status(400).json({ error: 'No update fields provided.' });
     }
 
@@ -616,8 +1340,55 @@ app.post('/api/users/:userId/update', async (req, res, next) => {
       body
     );
 
+    const actionTitle = getActionEntryTitle(body);
+    const actionName = body.locked !== undefined ? 'user.lock_state' : 'user.update';
+    const risk = body.password ? 'guarded' : body.locked ? 'destructive' : 'guarded';
+
+    logAdminAction({
+      req,
+      action: actionName,
+      title: actionTitle,
+      module: 'users',
+      risk,
+      status: 'success',
+      targetType: 'user',
+      targetId: userId,
+      request: {
+        has_displayname: body.displayname !== undefined,
+        has_password: Boolean(body.password),
+        admin: typeof body.admin === 'boolean' ? body.admin : null,
+        locked: typeof body.locked === 'boolean' ? body.locked : null
+      },
+      result: {
+        user_id: data?.name || userId,
+        admin: typeof data?.admin === 'boolean' ? data.admin : null,
+        deactivated: typeof data?.deactivated === 'boolean' ? data.deactivated : null,
+        locked: typeof data?.locked === 'boolean' ? data.locked : null
+      },
+      startedAt
+    });
+
     res.json(data || { ok: true });
   } catch (err) {
+    const { displayname, password, admin, locked } = req.body || {};
+    logAdminAction({
+      req,
+      action: locked !== undefined ? 'user.lock_state' : 'user.update',
+      title: locked ? 'Lock user' : locked === false ? 'Unlock user' : 'Update user',
+      module: 'users',
+      risk: locked !== undefined ? 'destructive' : 'guarded',
+      status: 'error',
+      targetType: 'user',
+      targetId: req.params.userId,
+      request: {
+        has_displayname: displayname !== undefined,
+        has_password: Boolean(password),
+        admin: typeof admin === 'boolean' ? admin : null,
+        locked: typeof locked === 'boolean' ? locked : null
+      },
+      error: err,
+      startedAt
+    });
     next(err);
   }
 });
@@ -649,11 +1420,28 @@ app.get('/api/users/:userId/devices', async (req, res, next) => {
 });
 
 app.post('/api/users/:userId/revoke_session', async (req, res, next) => {
+  const startedAt = Date.now();
   try {
     const userId = req.params.userId;
     const deviceId = req.body?.device_id;
 
     if (!deviceId) {
+      logAdminAction({
+        req,
+        action: 'session.revoke',
+        title: 'Revoke user session',
+        module: 'users',
+        risk: 'guarded',
+        status: 'error',
+        targetType: 'session',
+        targetId: userId,
+        request: {
+          device_id: null
+        },
+        error: { message: 'device_id is required.', status: 400 },
+        startedAt,
+        httpStatus: 400
+      });
       return res.status(400).json({ error: 'device_id is required.' });
     }
 
@@ -670,6 +1458,27 @@ app.post('/api/users/:userId/revoke_session', async (req, res, next) => {
     const remaining = Array.isArray(after?.devices) ? after.devices : [];
     const stillPresent = remaining.some((device) => device?.device_id === deviceId);
 
+    logAdminAction({
+      req,
+      action: 'session.revoke',
+      title: 'Revoke user session',
+      module: 'users',
+      risk: 'guarded',
+      status: stillPresent ? 'error' : 'success',
+      targetType: 'session',
+      targetId: `${userId}:${deviceId}`,
+      request: {
+        user_id: userId,
+        device_id: deviceId
+      },
+      result: {
+        still_present: stillPresent
+      },
+      error: stillPresent ? { message: 'Device still present after revoke request', status: 409 } : null,
+      startedAt,
+      httpStatus: stillPresent ? 409 : 200
+    });
+
     res.json({
       ok: !stillPresent,
       user_id: userId,
@@ -677,11 +1486,28 @@ app.post('/api/users/:userId/revoke_session', async (req, res, next) => {
       still_present: stillPresent
     });
   } catch (err) {
+    logAdminAction({
+      req,
+      action: 'session.revoke',
+      title: 'Revoke user session',
+      module: 'users',
+      risk: 'guarded',
+      status: 'error',
+      targetType: 'session',
+      targetId: `${req.params.userId}:${req.body?.device_id || 'unknown'}`,
+      request: {
+        user_id: req.params.userId,
+        device_id: req.body?.device_id || null
+      },
+      error: err,
+      startedAt
+    });
     next(err);
   }
 });
 
 app.post('/api/users/:userId/revoke_all_sessions', async (req, res, next) => {
+  const startedAt = Date.now();
   try {
     const userId = req.params.userId;
     const devicesData = await synapseRequest(
@@ -719,12 +1545,47 @@ app.post('/api/users/:userId/revoke_all_sessions', async (req, res, next) => {
     const remainingSet = new Set(remainingDevices.map((device) => device?.device_id).filter(Boolean));
     const unresolved = deviceIds.filter((id) => remainingSet.has(id));
 
+    const failedCount = failed.length + unresolved.length;
+    const revokedCount = deviceIds.length - failed.length - unresolved.length;
+
+    logAdminAction({
+      req,
+      action: 'session.revoke_all',
+      title: 'Revoke all sessions',
+      module: 'users',
+      risk: 'destructive',
+      status: failedCount ? 'error' : 'success',
+      targetType: 'user',
+      targetId: userId,
+      request: {
+        user_id: userId,
+        requested_count: deviceIds.length
+      },
+      result: {
+        requested_count: deviceIds.length,
+        revoked_count: revokedCount,
+        failed_count: failedCount
+      },
+      error: failedCount
+        ? {
+            message: `${failedCount} session revoke actions failed`,
+            status: 409,
+            details: {
+              failed_devices: failed.map((item) => item.device_id),
+              unresolved_devices: unresolved
+            }
+          }
+        : null,
+      startedAt,
+      httpStatus: failedCount ? 409 : 200
+    });
+
     res.json({
       ok: failed.length === 0 && unresolved.length === 0,
       user_id: userId,
       requested_count: deviceIds.length,
-      revoked_count: deviceIds.length - failed.length - unresolved.length,
-      failed_count: failed.length + unresolved.length,
+      revoked_count: revokedCount,
+      failed_count: failedCount,
       failures: [
         ...failed,
         ...unresolved.map((deviceId) => ({
@@ -734,6 +1595,21 @@ app.post('/api/users/:userId/revoke_all_sessions', async (req, res, next) => {
       ]
     });
   } catch (err) {
+    logAdminAction({
+      req,
+      action: 'session.revoke_all',
+      title: 'Revoke all sessions',
+      module: 'users',
+      risk: 'destructive',
+      status: 'error',
+      targetType: 'user',
+      targetId: req.params.userId,
+      request: {
+        user_id: req.params.userId
+      },
+      error: err,
+      startedAt
+    });
     next(err);
   }
 });
@@ -877,11 +1753,28 @@ app.get('/api/rooms/:roomId/state', async (req, res, next) => {
 });
 
 app.post('/api/rooms/:roomId/kick', async (req, res, next) => {
+  const startedAt = Date.now();
   try {
     const roomId = req.params.roomId;
     const { user_id, reason } = req.body || {};
 
     if (!user_id) {
+      logAdminAction({
+        req,
+        action: 'room.kick_member',
+        title: 'Kick user from room',
+        module: 'rooms',
+        risk: 'destructive',
+        status: 'error',
+        targetType: 'room',
+        targetId: roomId,
+        request: {
+          user_id: null
+        },
+        error: { message: 'user_id is required.', status: 400 },
+        startedAt,
+        httpStatus: 400
+      });
       return res.status(400).json({ error: 'user_id is required.' });
     }
 
@@ -894,18 +1787,74 @@ app.post('/api/rooms/:roomId/kick', async (req, res, next) => {
       }
     );
 
+    logAdminAction({
+      req,
+      action: 'room.kick_member',
+      title: 'Kick user from room',
+      module: 'rooms',
+      risk: 'destructive',
+      status: 'success',
+      targetType: 'room_member',
+      targetId: `${roomId}:${user_id}`,
+      request: {
+        room_id: roomId,
+        user_id,
+        has_reason: Boolean(reason)
+      },
+      result: {
+        kicked: true
+      },
+      startedAt
+    });
+
     res.json(data || { ok: true });
   } catch (err) {
+    logAdminAction({
+      req,
+      action: 'room.kick_member',
+      title: 'Kick user from room',
+      module: 'rooms',
+      risk: 'destructive',
+      status: 'error',
+      targetType: 'room_member',
+      targetId: `${req.params.roomId}:${req.body?.user_id || 'unknown'}`,
+      request: {
+        room_id: req.params.roomId,
+        user_id: req.body?.user_id || null,
+        has_reason: Boolean(req.body?.reason)
+      },
+      error: err,
+      startedAt
+    });
     next(err);
   }
 });
 
 app.post('/api/rooms/:roomId/power_level', async (req, res, next) => {
+  const startedAt = Date.now();
   try {
     const roomId = req.params.roomId;
     const { user_id, level } = req.body || {};
 
     if (!user_id || typeof level !== 'number') {
+      logAdminAction({
+        req,
+        action: 'room.set_power_level',
+        title: 'Change room power level',
+        module: 'rooms',
+        risk: 'guarded',
+        status: 'error',
+        targetType: 'room_member',
+        targetId: `${roomId}:${user_id || 'unknown'}`,
+        request: {
+          room_id: roomId,
+          user_id: user_id || null,
+          level: typeof level === 'number' ? level : null
+        },
+        error: { message: 'user_id and numeric level are required.', status: 400 },
+        startedAt,
+        httpStatus: 400
+      });
       return res.status(400).json({ error: 'user_id and numeric level are required.' });
     }
 
@@ -940,18 +1889,73 @@ app.post('/api/rooms/:roomId/power_level', async (req, res, next) => {
       updated
     );
 
+    logAdminAction({
+      req,
+      action: 'room.set_power_level',
+      title: 'Change room power level',
+      module: 'rooms',
+      risk: 'guarded',
+      status: 'success',
+      targetType: 'room_member',
+      targetId: `${roomId}:${user_id}`,
+      request: {
+        room_id: roomId,
+        user_id,
+        level
+      },
+      result: {
+        updated: true
+      },
+      startedAt
+    });
+
     res.json(data || { ok: true });
   } catch (err) {
+    logAdminAction({
+      req,
+      action: 'room.set_power_level',
+      title: 'Change room power level',
+      module: 'rooms',
+      risk: 'guarded',
+      status: 'error',
+      targetType: 'room_member',
+      targetId: `${req.params.roomId}:${req.body?.user_id || 'unknown'}`,
+      request: {
+        room_id: req.params.roomId,
+        user_id: req.body?.user_id || null,
+        level: typeof req.body?.level === 'number' ? req.body.level : null
+      },
+      error: err,
+      startedAt
+    });
     next(err);
   }
 });
 
 app.post('/api/rooms/:roomId/redact_user', async (req, res, next) => {
+  const startedAt = Date.now();
   try {
     const roomId = req.params.roomId;
     const { user_id, reason, limit } = req.body || {};
 
     if (!user_id) {
+      logAdminAction({
+        req,
+        action: 'room.redact_user_messages',
+        title: 'Redact user messages from room',
+        module: 'rooms',
+        risk: 'destructive',
+        status: 'error',
+        targetType: 'room_member',
+        targetId: `${roomId}:unknown`,
+        request: {
+          room_id: roomId,
+          user_id: null
+        },
+        error: { message: 'user_id is required.', status: 400 },
+        startedAt,
+        httpStatus: 400
+      });
       return res.status(400).json({ error: 'user_id is required.' });
     }
 
@@ -973,8 +1977,47 @@ app.post('/api/rooms/:roomId/redact_user', async (req, res, next) => {
       body
     );
 
+    logAdminAction({
+      req,
+      action: 'room.redact_user_messages',
+      title: 'Redact user messages from room',
+      module: 'rooms',
+      risk: 'destructive',
+      status: 'success',
+      targetType: 'room_member',
+      targetId: `${roomId}:${user_id}`,
+      request: {
+        room_id: roomId,
+        user_id,
+        has_reason: Boolean(reason),
+        limit: typeof limit === 'number' ? limit : null
+      },
+      result: {
+        redaction_task: data || null
+      },
+      startedAt
+    });
+
     res.json(data || { ok: true });
   } catch (err) {
+    logAdminAction({
+      req,
+      action: 'room.redact_user_messages',
+      title: 'Redact user messages from room',
+      module: 'rooms',
+      risk: 'destructive',
+      status: 'error',
+      targetType: 'room_member',
+      targetId: `${req.params.roomId}:${req.body?.user_id || 'unknown'}`,
+      request: {
+        room_id: req.params.roomId,
+        user_id: req.body?.user_id || null,
+        has_reason: Boolean(req.body?.reason),
+        limit: typeof req.body?.limit === 'number' ? req.body.limit : null
+      },
+      error: err,
+      startedAt
+    });
     next(err);
   }
 });
@@ -1001,6 +2044,7 @@ app.get('/api/rooms/:roomId/storage', async (req, res, next) => {
 });
 
 app.post('/api/users/:userId/reactivate', async (req, res, next) => {
+  const startedAt = Date.now();
   try {
     const userId = req.params.userId;
     const password = req.body?.password;
@@ -1019,8 +2063,42 @@ app.post('/api/users/:userId/reactivate', async (req, res, next) => {
       body
     );
 
+    logAdminAction({
+      req,
+      action: 'user.reactivate',
+      title: 'Reactivate user',
+      module: 'users',
+      risk: 'guarded',
+      status: 'success',
+      targetType: 'user',
+      targetId: userId,
+      request: {
+        has_password: Boolean(password)
+      },
+      result: {
+        user_id: data?.name || userId,
+        deactivated: Boolean(data?.deactivated)
+      },
+      startedAt
+    });
+
     res.json(data || { ok: true });
   } catch (err) {
+    logAdminAction({
+      req,
+      action: 'user.reactivate',
+      title: 'Reactivate user',
+      module: 'users',
+      risk: 'guarded',
+      status: 'error',
+      targetType: 'user',
+      targetId: req.params.userId,
+      request: {
+        has_password: Boolean(req.body?.password)
+      },
+      error: err,
+      startedAt
+    });
     next(err);
   }
 });
@@ -1033,6 +2111,37 @@ app.use((err, req, res, next) => {
   });
 });
 
+function flushCaches() {
+  persistRoomCache();
+  if (actionPersistTimer) {
+    clearTimeout(actionPersistTimer);
+    actionPersistTimer = null;
+  }
+  persistActionLog();
+}
+
+process.on('SIGINT', () => {
+  flushCaches();
+  process.exit(0);
+});
+
+process.on('SIGTERM', () => {
+  flushCaches();
+  process.exit(0);
+});
+
 app.listen(PORT, () => {
+  loadActionLog();
+  logAdminAction({
+    action: 'system.server_start',
+    title: 'Admin UI server started',
+    module: 'system',
+    risk: 'safe',
+    status: 'success',
+    result: {
+      port: PORT,
+      server_name: SYNAPSE_SERVER_NAME
+    }
+  });
   console.log(`Synapse Admin UI running at http://localhost:${PORT}`);
 });

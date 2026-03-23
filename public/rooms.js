@@ -4,6 +4,7 @@ const roomPrev = document.getElementById('roomPrev');
 const roomNext = document.getElementById('roomNext');
 const roomPageLabel = document.getElementById('roomPageLabel');
 const roomPageSize = document.getElementById('roomPageSize');
+const roomSearch = document.getElementById('roomSearch');
 const roomRefresh = document.getElementById('roomRefresh');
 const roomMembersModal = document.getElementById('roomMembersModal');
 const roomMembersTitle = document.getElementById('roomMembersTitle');
@@ -16,7 +17,8 @@ const state = {
   limit: 10,
   page: 1,
   nextToken: null,
-  pageTokens: ['0']
+  pageTokens: ['0'],
+  query: ''
 };
 
 const sortState = {
@@ -28,6 +30,7 @@ const membersState = {
   roomId: null,
   members: []
 };
+let searchDebounce = null;
 
 async function api(path) {
   const response = await fetch(path);
@@ -297,8 +300,9 @@ async function loadRooms() {
 
   const orderBy = mapSortKey(sortState.key);
   const dir = sortState.dir === 'asc' ? 'f' : 'b';
+  const query = state.query ? `&q=${encodeURIComponent(state.query)}` : '';
   const data = await api(
-    `/api/rooms?from=${encodeURIComponent(state.from)}&limit=${state.limit}&order_by=${orderBy}&dir=${dir}`
+    `/api/rooms?from=${encodeURIComponent(state.from)}&limit=${state.limit}&order_by=${orderBy}&dir=${dir}${query}`
   );
 
   const rooms = data?.rooms || [];
@@ -313,7 +317,8 @@ async function loadRooms() {
   roomPageLabel.textContent = `Page ${state.page}`;
   roomPrev.disabled = state.page <= 1;
   roomNext.disabled = !state.nextToken;
-  setStatus(`Loaded ${rooms.length} rooms`);
+  const total = Number(data?.total ?? rooms.length);
+  setStatus(`Loaded ${rooms.length} rooms (${total} matched)`);
 }
 
 roomPrev.addEventListener('click', async () => {
@@ -341,6 +346,19 @@ roomPageSize.addEventListener('change', async (event) => {
   resetPaging();
   await loadRooms();
 });
+
+if (roomSearch) {
+  roomSearch.addEventListener('input', () => {
+    if (searchDebounce) {
+      clearTimeout(searchDebounce);
+    }
+    searchDebounce = setTimeout(async () => {
+      state.query = roomSearch.value.trim();
+      resetPaging();
+      await loadRooms();
+    }, 260);
+  });
+}
 
 loadRooms().catch((err) => {
   setStatus(`Error: ${err.message}`);

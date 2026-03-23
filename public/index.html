@@ -38,9 +38,8 @@
 
         <div class="pane-section">
           <h2>Home</h2>
-          <a class="pane-link active" href="#dashboardSection">Dashboard</a>
+          <a class="pane-link active" href="#systemSection">System status</a>
           <a class="pane-link" href="#recentSection">Recent actions</a>
-          <a class="pane-link" href="#systemSection">System status</a>
         </div>
 
         <div class="pane-footer">Use the left rail to switch modules. Use this pane to navigate inside the current module.</div>
@@ -57,38 +56,158 @@
               audit-friendly controls and confirmation gates for risky actions.
             </p>
           </div>
-          <div class="status">Local admin console</div>
+          <div class="status" id="dashboardStatus">Loading dashboard...</div>
         </header>
 
         <div class="workspace-body">
           <section class="grid home-grid" id="dashboardSection">
-            <a class="card nav-card" href="/users.html">
-              <h2>User management</h2>
-              <p>Create, update, lock, reactivate, and review users.</p>
-              <span class="nav-link">Open user tools -&gt;</span>
-            </a>
-            <a class="card nav-card" href="/rooms.html">
-              <h2>Room management</h2>
-              <p>Browse rooms, inspect activity, and open room moderation.</p>
-              <span class="nav-link">Open room tools -&gt;</span>
-            </a>
-            <a class="card nav-card" href="/media.html">
-              <h2>Media management</h2>
-              <p>Reserved for retention, cleanup, and media governance workflows.</p>
-              <span class="nav-link">Open media tools -&gt;</span>
-            </a>
-            <div class="card" id="recentSection">
-              <h2>Recent actions</h2>
-              <p class="pane-note">Activity feed panel can be added here next.</p>
-            </div>
             <div class="card" id="systemSection">
-              <h2>System status</h2>
-              <p class="pane-note">Server health, background tasks, and cache state can live in this section.</p>
+              <div class="card-header">
+                <div>
+                  <h2>System status</h2>
+                  <p>Live Synapse health, cache metrics, queue depth, runtime, and audit-log state.</p>
+                </div>
+                <button class="btn ghost" id="systemRefreshBtn">Refresh status</button>
+              </div>
+
+              <div class="system-health-bar">
+                <span class="health-pill unknown" id="systemHealthPill">Unknown</span>
+                <span class="system-health-text" id="systemHealthText">Waiting for health check...</span>
+              </div>
+
+              <div class="grid system-grid">
+                <div class="card system-card">
+                  <h3>Synapse API</h3>
+                  <div class="info-list">
+                    <div class="info-item"><span>Connected server</span><strong id="systemServerName">...</strong></div>
+                    <div class="info-item"><span>Synapse version</span><strong id="systemSynapseVersion">...</strong></div>
+                    <div class="info-item"><span>API latency</span><strong id="systemApiLatency">...</strong></div>
+                    <div class="info-item"><span>Health checked</span><strong id="systemHealthChecked">...</strong></div>
+                    <div class="info-item"><span>Health error</span><strong id="systemHealthError">None</strong></div>
+                  </div>
+                </div>
+
+                <div class="card system-card">
+                  <h3>Room cache and queue</h3>
+                  <div class="info-list">
+                    <div class="info-item"><span>Cached rooms</span><strong id="systemRoomCacheEntries">0</strong></div>
+                    <div class="info-item"><span>Stale cache entries</span><strong id="systemRoomCacheStale">0</strong></div>
+                    <div class="info-item"><span>TTL-expired entries</span><strong id="systemRoomCacheTtlExpired">0</strong></div>
+                    <div class="info-item"><span>Refresh queue depth</span><strong id="systemQueueDepth">0</strong></div>
+                    <div class="info-item"><span>Queue worker</span><strong id="systemQueueState">Idle</strong></div>
+                    <div class="info-item"><span>Last queue refresh</span><strong id="systemQueueLastRun">Unknown</strong></div>
+                    <div class="info-item"><span>Last rooms fetch</span><strong id="systemRoomsFetch">Unknown</strong></div>
+                    <div class="info-item"><span>Rooms fetch duration</span><strong id="systemRoomsFetchDuration">Unknown</strong></div>
+                    <div class="info-item"><span>Last rooms fetch error</span><strong id="systemRoomsFetchError">None</strong></div>
+                    <div class="info-item"><span>Room cache persisted</span><strong id="systemRoomCachePersist">Unknown</strong></div>
+                  </div>
+                </div>
+
+                <div class="card system-card">
+                  <h3>Runtime and audit log</h3>
+                  <div class="info-list">
+                    <div class="info-item"><span>Node PID</span><strong id="systemPid">...</strong></div>
+                    <div class="info-item"><span>Node version</span><strong id="systemNodeVersion">...</strong></div>
+                    <div class="info-item"><span>Uptime</span><strong id="systemProcessUptime">...</strong></div>
+                    <div class="info-item"><span>Memory RSS</span><strong id="systemMemoryRss">...</strong></div>
+                    <div class="info-item"><span>Heap used / total</span><strong id="systemMemoryHeap">...</strong></div>
+                    <div class="info-item"><span>Recent feed records</span><strong id="systemFeedCount">0</strong></div>
+                    <div class="info-item"><span>Action log entries</span><strong id="systemActionEntries">0</strong></div>
+                    <div class="info-item"><span>Action log persisted</span><strong id="systemActionPersist">Unknown</strong></div>
+                    <div class="info-item"><span>Latest action</span><strong id="systemLastAction">None</strong></div>
+                    <div class="info-item"><span>Latest error</span><strong id="systemLastError">None</strong></div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="card recent-actions-card" id="recentSection">
+              <div class="card-header">
+                <div>
+                  <h2>Recent actions</h2>
+                  <p>Audit feed for admin operations, outcomes, and high-risk changes.</p>
+                </div>
+              </div>
+
+              <div class="actions-toolbar">
+                <input
+                  type="search"
+                  id="actionSearch"
+                  placeholder="Search user, room, action, IP, or error..."
+                  autocomplete="off"
+                />
+                <select id="actionModule">
+                  <option value="all">All modules</option>
+                  <option value="users">Users</option>
+                  <option value="rooms">Rooms</option>
+                  <option value="media">Media</option>
+                  <option value="system">System</option>
+                </select>
+                <select id="actionStatusFilter">
+                  <option value="all">All outcomes</option>
+                  <option value="success">Success only</option>
+                  <option value="error">Errors only</option>
+                </select>
+                <select id="actionRiskFilter">
+                  <option value="all">All risk levels</option>
+                  <option value="safe">Safe</option>
+                  <option value="guarded">Guarded</option>
+                  <option value="destructive">Destructive</option>
+                </select>
+                <select id="actionTimeRange">
+                  <option value="1h">Last hour</option>
+                  <option value="24h" selected>Last 24 hours</option>
+                  <option value="7d">Last 7 days</option>
+                  <option value="30d">Last 30 days</option>
+                  <option value="all">All time</option>
+                </select>
+                <button class="btn" id="actionRefreshBtn">Refresh</button>
+                <div class="toggle">
+                  <span class="toggle-label" id="actionAutoRefreshLabel">Auto refresh</span>
+                  <button
+                    class="toggle-switch"
+                    type="button"
+                    id="actionAutoRefresh"
+                    data-state="on"
+                    aria-pressed="true"
+                  >
+                    <span class="toggle-thumb"></span>
+                  </button>
+                </div>
+              </div>
+
+              <div class="actions-kpi-grid">
+                <div class="action-kpi">
+                  <span>Total</span>
+                  <strong id="kpiTotal">0</strong>
+                </div>
+                <div class="action-kpi">
+                  <span>Success</span>
+                  <strong id="kpiSuccess">0</strong>
+                </div>
+                <div class="action-kpi">
+                  <span>Errors</span>
+                  <strong id="kpiErrors">0</strong>
+                </div>
+                <div class="action-kpi">
+                  <span>Destructive</span>
+                  <strong id="kpiDestructive">0</strong>
+                </div>
+              </div>
+
+              <div class="action-feed" id="actionFeed">
+                <div class="details-empty">Loading action feed...</div>
+              </div>
+
+              <div class="action-feed-footer">
+                <button class="btn ghost" id="actionLoadMoreBtn" disabled>Load older actions</button>
+              </div>
             </div>
           </section>
         </div>
       </main>
     </div>
+    <script src="/index.js"></script>
   </body>
 </html>
 

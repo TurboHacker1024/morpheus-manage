@@ -4,7 +4,8 @@ const state = {
   page: 1,
   nextToken: null,
   users: [],
-  pageTokens: ['0']
+  pageTokens: ['0'],
+  query: ''
 };
 
 const statusEl = document.getElementById('status');
@@ -16,6 +17,7 @@ const prevBtn = document.getElementById('prevBtn');
 const nextBtn = document.getElementById('nextBtn');
 const refreshBtn = document.getElementById('refreshBtn');
 const pageSize = document.getElementById('pageSize');
+const userSearch = document.getElementById('userSearch');
 const createForm = document.getElementById('createForm');
 const createNote = document.getElementById('createNote');
 const showDisabledToggle = document.getElementById('showDisabledToggle');
@@ -79,6 +81,7 @@ let sortState = {
   key: 'user',
   dir: 'asc'
 };
+let searchDebounce = null;
 
 async function api(path, options = {}) {
   const config = {
@@ -305,16 +308,49 @@ function getUserFallback(user) {
 
 function getAvatarSrc(user) {
   const avatarUrl = user?.avatar_url || '';
-  if (!avatarUrl) return null;
+  const candidates = [];
+
+  if (user?.avatar_thumbnail_url) {
+    candidates.push(user.avatar_thumbnail_url);
+  }
+
+  if (user?.avatar_download_url) {
+    candidates.push(user.avatar_download_url);
+  }
 
   if (avatarUrl.startsWith('mxc://')) {
-    return `/api/media/thumbnail?mxc=${encodeURIComponent(avatarUrl)}&width=48&height=48&method=crop`;
+    candidates.push(`/api/media/thumbnail?mxc=${encodeURIComponent(avatarUrl)}&width=48&height=48&method=crop`);
+    candidates.push(`/api/media/download?mxc=${encodeURIComponent(avatarUrl)}`);
+  } else if (avatarUrl.startsWith('http://') || avatarUrl.startsWith('https://')) {
+    candidates.push(avatarUrl);
   }
 
-  if (avatarUrl.startsWith('http://') || avatarUrl.startsWith('https://')) {
-    return avatarUrl;
-  }
+  return candidates.filter(Boolean);
+}
 
+async function resolveAvatarBlobUrl(candidates) {
+  for (let i = 0; i < candidates.length; i += 1) {
+    const src = candidates[i];
+    const separator = src.includes('?') ? '&' : '?';
+    const url = `${src}${separator}_avatar_cb=${Date.now()}_${i}`;
+    try {
+      const response = await fetch(url, { cache: 'no-store' });
+      if (!response.ok) {
+        continue;
+      }
+      const contentType = String(response.headers.get('content-type') || '').toLowerCase();
+      if (!contentType.startsWith('image/')) {
+        continue;
+      }
+      const blob = await response.blob();
+      if (!blob || !blob.size) {
+        continue;
+      }
+      return URL.createObjectURL(blob);
+    } catch (err) {
+      // Try next candidate.
+    }
+  }
   return null;
 }
 
@@ -324,28 +360,37 @@ function buildAvatarElement(user) {
   const fallback = getUserFallback(user);
   avatar.textContent = fallback;
 
-  const src = getAvatarSrc(user);
-  if (!src) {
+  const candidates = getAvatarSrc(user);
+  if (!candidates.length) {
     return avatar;
   }
 
   const image = document.createElement('img');
   image.alt = `${user.displayname || user.name || 'User'} avatar`;
-  image.loading = 'lazy';
-  image.decoding = 'async';
-  image.referrerPolicy = 'no-referrer';
-
-  image.addEventListener('load', () => {
-    avatar.classList.add('has-image');
-    avatar.textContent = '';
-    avatar.appendChild(image);
-  });
-
-  image.addEventListener('error', () => {
-    avatar.classList.remove('has-image');
-  });
-
-  image.src = src;
+  image.loading = 'eager';
+  resolveAvatarBlobUrl(candidates)
+    .then((blobUrl) => {
+      if (!blobUrl) {
+        avatar.classList.remove('has-image');
+        return;
+      }
+      image.addEventListener(
+        'load',
+        () => {
+          URL.revokeObjectURL(blobUrl);
+        },
+        { once: true }
+      );
+      avatar.classList.add('has-image');
+      avatar.textContent = '';
+      if (!avatar.contains(image)) {
+        avatar.appendChild(image);
+      }
+      image.src = blobUrl;
+    })
+    .catch(() => {
+      avatar.classList.remove('has-image');
+    });
 
   return avatar;
 }
@@ -370,8 +415,9 @@ async function loadUsers() {
   const deactivatedParam = showDisabled ? 'true' : 'false';
   const orderBy = mapSortKey(sortState.key);
   const dir = sortState.dir === 'asc' ? 'f' : 'b';
+  const query = state.query ? `&q=${encodeURIComponent(state.query)}` : '';
   const data = await api(
-    `/api/users?from=${encodeURIComponent(state.from)}&limit=${state.limit}&guests=false&deactivated=${deactivatedParam}&order_by=${orderBy}&dir=${dir}`
+    `/api/users?from=${encodeURIComponent(state.from)}&limit=${state.limit}&guests=false&deactivated=${deactivatedParam}&order_by=${orderBy}&dir=${dir}${query}`
   );
   const users = data?.users || [];
   state.users = users;
@@ -387,7 +433,8 @@ async function loadUsers() {
   pageLabel.textContent = `Page ${state.page}`;
   prevBtn.disabled = state.page <= 1;
   nextBtn.disabled = !state.nextToken;
-  setStatus(`Loaded ${visibleUsers.length} users`);
+  const total = Number(data?.total ?? visibleUsers.length);
+  setStatus(`Loaded ${visibleUsers.length} users (${total} matched)`);
 }
 
 function mapSortKey(key) {
@@ -858,6 +905,19 @@ pageSize.addEventListener('change', async (event) => {
   resetPaging();
   await loadUsers();
 });
+
+if (userSearch) {
+  userSearch.addEventListener('input', () => {
+    if (searchDebounce) {
+      clearTimeout(searchDebounce);
+    }
+    searchDebounce = setTimeout(async () => {
+      state.query = userSearch.value.trim();
+      resetPaging();
+      await loadUsers();
+    }, 260);
+  });
+}
 
 showDisabledToggle.addEventListener('click', async () => {
   const isOn = showDisabledToggle.dataset.state === 'on';

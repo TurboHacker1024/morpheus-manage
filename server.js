@@ -17,7 +17,7 @@ if (!SYNAPSE_BASE_URL || !SYNAPSE_ADMIN_TOKEN || !SYNAPSE_SERVER_NAME) {
   process.exit(1);
 }
 
-app.use(express.json({ limit: '1mb' }));
+app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '12mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/api', (req, res, next) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
@@ -36,6 +36,10 @@ const ACTION_LOG_FILE = path.join(__dirname, 'cache', 'actions.json');
 const ACTION_LOG_MAX_ENTRIES = Math.max(200, Number(process.env.ACTION_LOG_MAX_ENTRIES || 5000));
 const ACTION_PERSIST_DEBOUNCE_MS = 250;
 const SYNAPSE_HEALTH_CACHE_TTL_MS = 15 * 1000;
+const MAX_AVATAR_UPLOAD_BYTES = Math.max(
+  256 * 1024,
+  Number(process.env.MAX_AVATAR_UPLOAD_BYTES || 5 * 1024 * 1024)
+);
 
 let roomActivityCache = new Map();
 let roomCacheLoaded = false;
@@ -660,6 +664,148 @@ async function synapseRequest(method, endpoint, body, query) {
   return data;
 }
 
+function isSupportedAvatarContentType(contentType) {
+  const value = String(contentType || '').toLowerCase().trim();
+  return value.startsWith('image/');
+}
+
+function decodeBase64Payload(payload) {
+  const value = String(payload || '').trim();
+  if (!value) return null;
+  const commaIndex = value.indexOf(',');
+  const normalized = commaIndex >= 0 ? value.slice(commaIndex + 1) : value;
+  return Buffer.from(normalized, 'base64');
+}
+
+async function uploadSynapseMedia(buffer, contentType, filename) {
+  const uploadUrl = buildSynapseUrl('/_matrix/media/v3/upload', {
+    filename: filename || 'avatar'
+  });
+
+  const response = await fetch(uploadUrl, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${SYNAPSE_ADMIN_TOKEN}`,
+      'Content-Type': contentType || 'application/octet-stream'
+    },
+    body: buffer
+  });
+
+  const text = await response.text();
+  let data = null;
+  if (text) {
+    try {
+      data = JSON.parse(text);
+    } catch (err) {
+      data = { raw: text };
+    }
+  }
+
+  if (!response.ok) {
+    const error = new Error(data?.error || `Media upload failed (${response.status})`);
+    error.status = response.status;
+    error.data = data;
+    throw error;
+  }
+
+  const contentUri = data?.content_uri || data?.content_uri?.toString?.();
+  if (!contentUri || typeof contentUri !== 'string' || !contentUri.startsWith('mxc://')) {
+    const error = new Error('Upload succeeded but no content_uri returned.');
+    error.status = 500;
+    error.data = data;
+    throw error;
+  }
+
+  return contentUri;
+}
+
+function buildAvatarPayload(avatarUrl) {
+  return {
+    avatar_url: avatarUrl || null,
+    avatar_thumbnail_url: buildAvatarThumbnailPath(avatarUrl, 48),
+    avatar_download_url: buildAvatarDownloadPath(avatarUrl)
+  };
+}
+
+function parseMaybeJson(text) {
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    return text;
+  }
+}
+
+function getMediaEndpointCandidates(parsed, kind) {
+  const server = encodeURIComponent(parsed.server);
+  const mediaId = encodeURIComponent(parsed.mediaId);
+
+  if (kind === 'thumbnail') {
+    return [
+      `/_matrix/client/v1/media/thumbnail/${server}/${mediaId}`,
+      `/_matrix/media/v3/thumbnail/${server}/${mediaId}`,
+      `/_matrix/media/r0/thumbnail/${server}/${mediaId}`
+    ];
+  }
+
+  return [
+    `/_matrix/client/v1/media/download/${server}/${mediaId}`,
+    `/_matrix/media/v3/download/${server}/${mediaId}`,
+    `/_matrix/media/r0/download/${server}/${mediaId}`
+  ];
+}
+
+async function tryFetchSynapseMedia({ parsed, kind, query = null }) {
+  const attempts = [];
+  const candidates = getMediaEndpointCandidates(parsed, kind);
+
+  for (const endpoint of candidates) {
+    const url = buildSynapseUrl(endpoint, query);
+    try {
+      const upstream = await fetch(url, {
+        headers: {
+          Authorization: `Bearer ${SYNAPSE_ADMIN_TOKEN}`
+        }
+      });
+
+      if (upstream.ok) {
+        return { upstream, attempts, resolved_url: url };
+      }
+
+      const text = await upstream.text();
+      attempts.push({
+        url,
+        status: upstream.status,
+        details: parseMaybeJson(text)
+      });
+    } catch (err) {
+      attempts.push({
+        url,
+        status: 0,
+        details: err.message || 'Network error'
+      });
+    }
+  }
+
+  const lastStatus = attempts.length ? attempts[attempts.length - 1].status : 502;
+  return {
+    upstream: null,
+    attempts,
+    status: Number(lastStatus) || 502
+  };
+}
+
+async function sendProxiedMediaResponse(res, upstream, fallbackType) {
+  const contentType = upstream.headers.get('content-type') || fallbackType || 'application/octet-stream';
+  const cacheControl = upstream.headers.get('cache-control') || 'public, max-age=3600';
+  const arrayBuffer = await upstream.arrayBuffer();
+  const body = Buffer.from(arrayBuffer);
+
+  res.set('Content-Type', contentType);
+  res.set('Cache-Control', cacheControl);
+  res.send(body);
+}
+
 function toTimestamp(value) {
   if (value === undefined || value === null || value === '') return null;
   const numeric = Number(value);
@@ -930,64 +1076,38 @@ app.get('/api/media/thumbnail', async (req, res, next) => {
       return res.status(400).json({ error: 'mxc query parameter is required (mxc://server/mediaId).' });
     }
 
-    const endpoint = `/_matrix/media/v3/thumbnail/${encodeURIComponent(parsed.server)}/${encodeURIComponent(parsed.mediaId)}`;
-    const url = buildSynapseUrl(endpoint, {
+    const thumbnailQuery = {
       width: Math.max(1, width),
       height: Math.max(1, height),
       method: method === 'scale' ? 'scale' : 'crop'
+    };
+
+    const thumbnailResult = await tryFetchSynapseMedia({
+      parsed,
+      kind: 'thumbnail',
+      query: thumbnailQuery
     });
 
-    const upstream = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${SYNAPSE_ADMIN_TOKEN}`
-      }
-    });
-
-    if (!upstream.ok) {
-      // Some deployments don't generate thumbnails for every media item.
-      // If thumbnail lookup fails, fall back to direct media download.
-      if (upstream.status === 404) {
-        const fallbackUrl = buildSynapseUrl(
-          `/_matrix/media/v3/download/${encodeURIComponent(parsed.server)}/${encodeURIComponent(parsed.mediaId)}`
-        );
-        const fallback = await fetch(fallbackUrl, {
-          headers: {
-            Authorization: `Bearer ${SYNAPSE_ADMIN_TOKEN}`
-          }
-        });
-        if (fallback.ok) {
-          const contentType = fallback.headers.get('content-type') || 'application/octet-stream';
-          const cacheControl = fallback.headers.get('cache-control') || 'public, max-age=3600';
-          const arrayBuffer = await fallback.arrayBuffer();
-          const body = Buffer.from(arrayBuffer);
-          res.set('Content-Type', contentType);
-          res.set('Cache-Control', cacheControl);
-          return res.send(body);
-        }
-      }
-
-      const text = await upstream.text();
-      let details = null;
-      try {
-        details = JSON.parse(text);
-      } catch (err) {
-        details = text || null;
-      }
-
-      return res.status(upstream.status).json({
-        error: 'Unable to fetch media thumbnail.',
-        details
-      });
+    if (thumbnailResult.upstream) {
+      return sendProxiedMediaResponse(res, thumbnailResult.upstream, 'image/jpeg');
     }
 
-    const contentType = upstream.headers.get('content-type') || 'image/jpeg';
-    const cacheControl = upstream.headers.get('cache-control') || 'public, max-age=3600';
-    const arrayBuffer = await upstream.arrayBuffer();
-    const body = Buffer.from(arrayBuffer);
+    // If thumbnails aren't available, fall back to the original media.
+    const downloadResult = await tryFetchSynapseMedia({
+      parsed,
+      kind: 'download'
+    });
+    if (downloadResult.upstream) {
+      return sendProxiedMediaResponse(res, downloadResult.upstream, 'application/octet-stream');
+    }
 
-    res.set('Content-Type', contentType);
-    res.set('Cache-Control', cacheControl);
-    res.send(body);
+    return res.status(downloadResult.status || thumbnailResult.status || 502).json({
+      error: 'Unable to fetch media thumbnail.',
+      details: {
+        thumbnail_attempts: thumbnailResult.attempts,
+        download_attempts: downloadResult.attempts
+      }
+    });
   } catch (err) {
     next(err);
   }
@@ -1001,37 +1121,20 @@ app.get('/api/media/download', async (req, res, next) => {
       return res.status(400).json({ error: 'mxc query parameter is required (mxc://server/mediaId).' });
     }
 
-    const url = buildSynapseUrl(
-      `/_matrix/media/v3/download/${encodeURIComponent(parsed.server)}/${encodeURIComponent(parsed.mediaId)}`
-    );
-    const upstream = await fetch(url, {
-      headers: {
-        Authorization: `Bearer ${SYNAPSE_ADMIN_TOKEN}`
-      }
+    const result = await tryFetchSynapseMedia({
+      parsed,
+      kind: 'download'
     });
-
-    if (!upstream.ok) {
-      const text = await upstream.text();
-      let details = null;
-      try {
-        details = JSON.parse(text);
-      } catch (err) {
-        details = text || null;
-      }
-      return res.status(upstream.status).json({
+    if (!result.upstream) {
+      return res.status(result.status || 502).json({
         error: 'Unable to fetch media download.',
-        details
+        details: {
+          attempts: result.attempts
+        }
       });
     }
 
-    const contentType = upstream.headers.get('content-type') || 'application/octet-stream';
-    const cacheControl = upstream.headers.get('cache-control') || 'public, max-age=3600';
-    const arrayBuffer = await upstream.arrayBuffer();
-    const body = Buffer.from(arrayBuffer);
-
-    res.set('Content-Type', contentType);
-    res.set('Cache-Control', cacheControl);
-    res.send(body);
+    await sendProxiedMediaResponse(res, result.upstream, 'application/octet-stream');
   } catch (err) {
     next(err);
   }
@@ -1385,6 +1488,246 @@ app.post('/api/users/:userId/update', async (req, res, next) => {
         has_password: Boolean(password),
         admin: typeof admin === 'boolean' ? admin : null,
         locked: typeof locked === 'boolean' ? locked : null
+      },
+      error: err,
+      startedAt
+    });
+    next(err);
+  }
+});
+
+app.post('/api/users/:userId/avatar/remove', async (req, res, next) => {
+  const startedAt = Date.now();
+  try {
+    const userId = req.params.userId;
+
+    await synapseRequest(
+      'PUT',
+      `/_synapse/admin/v2/users/${encodeURIComponent(userId)}`,
+      { avatar_url: '' }
+    );
+
+    logAdminAction({
+      req,
+      action: 'user.avatar_remove',
+      title: 'Remove user avatar',
+      module: 'users',
+      risk: 'guarded',
+      status: 'success',
+      targetType: 'user',
+      targetId: userId,
+      request: {
+        user_id: userId
+      },
+      result: {
+        avatar_removed: true
+      },
+      startedAt
+    });
+
+    res.json({
+      ok: true,
+      user_id: userId,
+      ...buildAvatarPayload(null)
+    });
+  } catch (err) {
+    logAdminAction({
+      req,
+      action: 'user.avatar_remove',
+      title: 'Remove user avatar',
+      module: 'users',
+      risk: 'guarded',
+      status: 'error',
+      targetType: 'user',
+      targetId: req.params.userId,
+      request: {
+        user_id: req.params.userId
+      },
+      error: err,
+      startedAt
+    });
+    next(err);
+  }
+});
+
+app.post('/api/users/:userId/avatar', async (req, res, next) => {
+  const startedAt = Date.now();
+  try {
+    const userId = req.params.userId;
+    const {
+      avatar_url: avatarUrlInput,
+      image_base64: imageBase64,
+      content_type: contentType,
+      filename
+    } = req.body || {};
+
+    let avatarUrl = typeof avatarUrlInput === 'string' ? avatarUrlInput.trim() : '';
+
+    if (!avatarUrl) {
+      if (!imageBase64) {
+        logAdminAction({
+          req,
+          action: 'user.avatar_set',
+          title: 'Set user avatar',
+          module: 'users',
+          risk: 'guarded',
+          status: 'error',
+          targetType: 'user',
+          targetId: userId,
+          request: {
+            user_id: userId,
+            has_avatar_url: Boolean(avatarUrlInput),
+            has_image_payload: Boolean(imageBase64)
+          },
+          error: { message: 'Provide avatar_url or image_base64 payload.', status: 400 },
+          startedAt,
+          httpStatus: 400
+        });
+        return res.status(400).json({ error: 'Provide avatar_url or image_base64 payload.' });
+      }
+
+      if (!isSupportedAvatarContentType(contentType)) {
+        logAdminAction({
+          req,
+          action: 'user.avatar_set',
+          title: 'Set user avatar',
+          module: 'users',
+          risk: 'guarded',
+          status: 'error',
+          targetType: 'user',
+          targetId: userId,
+          request: {
+            user_id: userId,
+            content_type: contentType || null
+          },
+          error: { message: 'content_type must be an image MIME type.', status: 400 },
+          startedAt,
+          httpStatus: 400
+        });
+        return res.status(400).json({ error: 'content_type must be an image MIME type.' });
+      }
+
+      const decoded = decodeBase64Payload(imageBase64);
+      if (!decoded || !decoded.length) {
+        logAdminAction({
+          req,
+          action: 'user.avatar_set',
+          title: 'Set user avatar',
+          module: 'users',
+          risk: 'guarded',
+          status: 'error',
+          targetType: 'user',
+          targetId: userId,
+          request: {
+            user_id: userId,
+            content_type: contentType || null
+          },
+          error: { message: 'Invalid image_base64 payload.', status: 400 },
+          startedAt,
+          httpStatus: 400
+        });
+        return res.status(400).json({ error: 'Invalid image_base64 payload.' });
+      }
+
+      if (decoded.length > MAX_AVATAR_UPLOAD_BYTES) {
+        logAdminAction({
+          req,
+          action: 'user.avatar_set',
+          title: 'Set user avatar',
+          module: 'users',
+          risk: 'guarded',
+          status: 'error',
+          targetType: 'user',
+          targetId: userId,
+          request: {
+            user_id: userId,
+            content_type: contentType || null,
+            file_size: decoded.length
+          },
+          error: {
+            message: `Avatar file exceeds limit of ${MAX_AVATAR_UPLOAD_BYTES} bytes.`,
+            status: 400
+          },
+          startedAt,
+          httpStatus: 400
+        });
+        return res.status(400).json({
+          error: `Avatar file exceeds limit of ${MAX_AVATAR_UPLOAD_BYTES} bytes.`
+        });
+      }
+
+      avatarUrl = await uploadSynapseMedia(decoded, contentType, filename || 'avatar');
+    }
+
+    if (!avatarUrl.startsWith('mxc://')) {
+      logAdminAction({
+        req,
+        action: 'user.avatar_set',
+        title: 'Set user avatar',
+        module: 'users',
+        risk: 'guarded',
+        status: 'error',
+        targetType: 'user',
+        targetId: userId,
+        request: {
+          user_id: userId,
+          avatar_url: avatarUrl
+        },
+        error: { message: 'avatar_url must be an mxc:// URI.', status: 400 },
+        startedAt,
+        httpStatus: 400
+      });
+      return res.status(400).json({ error: 'avatar_url must be an mxc:// URI.' });
+    }
+
+    await synapseRequest(
+      'PUT',
+      `/_synapse/admin/v2/users/${encodeURIComponent(userId)}`,
+      { avatar_url: avatarUrl }
+    );
+
+    logAdminAction({
+      req,
+      action: 'user.avatar_set',
+      title: 'Set user avatar',
+      module: 'users',
+      risk: 'guarded',
+      status: 'success',
+      targetType: 'user',
+      targetId: userId,
+      request: {
+        user_id: userId,
+        has_uploaded_file: Boolean(imageBase64),
+        filename: filename || null,
+        content_type: contentType || null,
+        avatar_url: avatarUrl
+      },
+      result: {
+        avatar_url: avatarUrl
+      },
+      startedAt
+    });
+
+    res.json({
+      ok: true,
+      user_id: userId,
+      ...buildAvatarPayload(avatarUrl)
+    });
+  } catch (err) {
+    logAdminAction({
+      req,
+      action: 'user.avatar_set',
+      title: 'Set user avatar',
+      module: 'users',
+      risk: 'guarded',
+      status: 'error',
+      targetType: 'user',
+      targetId: req.params.userId,
+      request: {
+        user_id: req.params.userId,
+        has_uploaded_file: Boolean(req.body?.image_base64),
+        filename: req.body?.filename || null,
+        content_type: req.body?.content_type || null
       },
       error: err,
       startedAt

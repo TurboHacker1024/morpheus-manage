@@ -67,6 +67,16 @@ const infoEmail = document.getElementById('infoEmail');
 const infoLastActive = document.getElementById('infoLastActive');
 const infoDevices = document.getElementById('infoDevices');
 const infoRooms = document.getElementById('infoRooms');
+const avatarModal = document.getElementById('avatarModal');
+const avatarModalTitle = document.getElementById('avatarModalTitle');
+const avatarModalSubtitle = document.getElementById('avatarModalSubtitle');
+const avatarModalImage = document.getElementById('avatarModalImage');
+const avatarModalFallback = document.getElementById('avatarModalFallback');
+const avatarFileInput = document.getElementById('avatarFileInput');
+const avatarModalStatus = document.getElementById('avatarModalStatus');
+const avatarUploadBtn = document.getElementById('avatarUploadBtn');
+const avatarRemoveBtn = document.getElementById('avatarRemoveBtn');
+const avatarCloseBtn = document.getElementById('avatarCloseBtn');
 
 let pendingDeactivateUser = null;
 let pendingReactivateUser = null;
@@ -82,6 +92,8 @@ let sortState = {
   dir: 'asc'
 };
 let searchDebounce = null;
+let pendingAvatarUser = null;
+let avatarPreviewBlobUrl = null;
 
 async function api(path, options = {}) {
   const config = {
@@ -306,12 +318,20 @@ function getUserFallback(user) {
   return normalized.charAt(0).toUpperCase();
 }
 
-function getAvatarSrc(user) {
+function getAvatarCandidates(user, size = 48) {
   const avatarUrl = user?.avatar_url || '';
+  const normalizedSize = Math.max(16, Number(size) || 48);
   const candidates = [];
 
-  if (user?.avatar_thumbnail_url) {
-    candidates.push(user.avatar_thumbnail_url);
+  if (normalizedSize > 96) {
+    if (user?.avatar_download_url) {
+      candidates.push(user.avatar_download_url);
+    }
+    if (user?.avatar_thumbnail_url) {
+      candidates.push(user.avatar_thumbnail_url.replace(/width=\d+/i, `width=${normalizedSize}`));
+    }
+  } else if (user?.avatar_thumbnail_url) {
+    candidates.push(user.avatar_thumbnail_url.replace(/width=\d+/i, `width=${normalizedSize}`));
   }
 
   if (user?.avatar_download_url) {
@@ -319,13 +339,15 @@ function getAvatarSrc(user) {
   }
 
   if (avatarUrl.startsWith('mxc://')) {
-    candidates.push(`/api/media/thumbnail?mxc=${encodeURIComponent(avatarUrl)}&width=48&height=48&method=crop`);
+    candidates.push(
+      `/api/media/thumbnail?mxc=${encodeURIComponent(avatarUrl)}&width=${normalizedSize}&height=${normalizedSize}&method=crop`
+    );
     candidates.push(`/api/media/download?mxc=${encodeURIComponent(avatarUrl)}`);
   } else if (avatarUrl.startsWith('http://') || avatarUrl.startsWith('https://')) {
     candidates.push(avatarUrl);
   }
 
-  return candidates.filter(Boolean);
+  return Array.from(new Set(candidates.filter(Boolean)));
 }
 
 async function resolveAvatarBlobUrl(candidates) {
@@ -339,8 +361,15 @@ async function resolveAvatarBlobUrl(candidates) {
         continue;
       }
       const contentType = String(response.headers.get('content-type') || '').toLowerCase();
-      if (!contentType.startsWith('image/')) {
+      if (
+        contentType &&
+        !contentType.startsWith('image/') &&
+        contentType !== 'application/octet-stream'
+      ) {
         continue;
+      }
+      if (contentType === 'application/octet-stream') {
+        return url;
       }
       const blob = await response.blob();
       if (!blob || !blob.size) {
@@ -355,44 +384,145 @@ async function resolveAvatarBlobUrl(candidates) {
 }
 
 function buildAvatarElement(user) {
-  const avatar = document.createElement('div');
-  avatar.className = 'user-avatar';
+  const avatar = document.createElement('button');
+  avatar.className = 'user-avatar avatar-trigger';
+  avatar.type = 'button';
+  avatar.setAttribute('aria-label', `View avatar for ${user.displayname || user.name || 'user'}`);
   const fallback = getUserFallback(user);
   avatar.textContent = fallback;
 
-  const candidates = getAvatarSrc(user);
-  if (!candidates.length) {
-    return avatar;
+  avatar.addEventListener('click', () => openAvatarModal(user));
+
+  const candidates = getAvatarCandidates(user, 48);
+  if (candidates.length) {
+    const image = document.createElement('img');
+    image.alt = `${user.displayname || user.name || 'User'} avatar`;
+    image.loading = 'eager';
+    resolveAvatarBlobUrl(candidates)
+      .then((blobUrl) => {
+        if (!blobUrl) {
+          avatar.classList.remove('has-image');
+          return;
+        }
+        if (blobUrl.startsWith('blob:')) {
+          image.addEventListener(
+            'load',
+            () => {
+              URL.revokeObjectURL(blobUrl);
+            },
+            { once: true }
+          );
+        }
+        avatar.classList.add('has-image');
+        avatar.textContent = '';
+        if (!avatar.contains(image)) {
+          avatar.appendChild(image);
+        }
+        image.src = blobUrl;
+      })
+      .catch(() => {
+        avatar.classList.remove('has-image');
+      });
   }
 
-  const image = document.createElement('img');
-  image.alt = `${user.displayname || user.name || 'User'} avatar`;
-  image.loading = 'eager';
-  resolveAvatarBlobUrl(candidates)
-    .then((blobUrl) => {
-      if (!blobUrl) {
-        avatar.classList.remove('has-image');
-        return;
-      }
-      image.addEventListener(
-        'load',
-        () => {
-          URL.revokeObjectURL(blobUrl);
-        },
-        { once: true }
-      );
-      avatar.classList.add('has-image');
-      avatar.textContent = '';
-      if (!avatar.contains(image)) {
-        avatar.appendChild(image);
-      }
-      image.src = blobUrl;
-    })
-    .catch(() => {
-      avatar.classList.remove('has-image');
-    });
-
   return avatar;
+}
+
+function revokeAvatarPreviewBlobUrl() {
+  if (avatarPreviewBlobUrl && String(avatarPreviewBlobUrl).startsWith('blob:')) {
+    URL.revokeObjectURL(avatarPreviewBlobUrl);
+  }
+  avatarPreviewBlobUrl = null;
+}
+
+function showAvatarPreview(blobUrl) {
+  revokeAvatarPreviewBlobUrl();
+  avatarPreviewBlobUrl = blobUrl;
+  avatarModalImage.src = blobUrl;
+  avatarModalImage.classList.remove('hidden');
+  avatarModalFallback.classList.add('hidden');
+}
+
+function showAvatarFallback(message) {
+  revokeAvatarPreviewBlobUrl();
+  avatarModalImage.removeAttribute('src');
+  avatarModalImage.classList.add('hidden');
+  avatarModalFallback.textContent = message || 'No profile photo';
+  avatarModalFallback.classList.remove('hidden');
+}
+
+function setAvatarModalStatus(message, isError = false) {
+  if (!avatarModalStatus) return;
+  avatarModalStatus.textContent = message || '';
+  avatarModalStatus.style.color = isError ? 'var(--danger)' : 'var(--muted)';
+}
+
+function closeAvatarModal() {
+  avatarModal.classList.add('hidden');
+  avatarModal.setAttribute('aria-hidden', 'true');
+  pendingAvatarUser = null;
+  if (avatarFileInput) {
+    avatarFileInput.value = '';
+  }
+  setAvatarModalStatus('');
+  showAvatarFallback('No profile photo');
+}
+
+async function refreshAvatarPreviewForUser(user) {
+  const candidates = getAvatarCandidates(user, 640);
+  if (!candidates.length) {
+    showAvatarFallback('No profile photo set');
+    return;
+  }
+
+  const blobUrl = await resolveAvatarBlobUrl(candidates);
+  if (!blobUrl) {
+    showAvatarFallback('Profile photo unavailable');
+    return;
+  }
+  showAvatarPreview(blobUrl);
+}
+
+function openAvatarModal(user) {
+  pendingAvatarUser = {
+    ...user
+  };
+  avatarModalTitle.textContent = user.displayname || 'No display name';
+  avatarModalSubtitle.textContent = user.name;
+  setAvatarModalStatus('');
+  if (avatarFileInput) {
+    avatarFileInput.value = '';
+  }
+  showAvatarFallback('Loading profile photo...');
+  avatarModal.classList.remove('hidden');
+  avatarModal.setAttribute('aria-hidden', 'false');
+
+  refreshAvatarPreviewForUser(pendingAvatarUser).catch(() => {
+    showAvatarFallback('Unable to load profile photo');
+  });
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = String(reader.result || '');
+      const comma = result.indexOf(',');
+      resolve(comma >= 0 ? result.slice(comma + 1) : result);
+    };
+    reader.onerror = () => reject(new Error('Unable to read file.'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function updateUserInCurrentState(userId, patch) {
+  state.users = state.users.map((user) => {
+    if (user.name !== userId) return user;
+    return {
+      ...user,
+      ...patch
+    };
+  });
 }
 
 async function loadConfig() {
@@ -827,6 +957,100 @@ function openInfoModal(userId) {
 infoClose.addEventListener('click', () => {
   infoModal.classList.add('hidden');
   infoModal.setAttribute('aria-hidden', 'true');
+});
+
+avatarCloseBtn.addEventListener('click', () => {
+  closeAvatarModal();
+});
+
+avatarModal.addEventListener('click', (event) => {
+  if (event.target === avatarModal) {
+    closeAvatarModal();
+  }
+});
+
+avatarUploadBtn.addEventListener('click', async () => {
+  if (!pendingAvatarUser) return;
+  const file = avatarFileInput?.files?.[0];
+  if (!file) {
+    setAvatarModalStatus('Select an image file first.', true);
+    return;
+  }
+  if (!String(file.type || '').startsWith('image/')) {
+    setAvatarModalStatus('Only image files are supported.', true);
+    return;
+  }
+
+  try {
+    avatarUploadBtn.disabled = true;
+    avatarRemoveBtn.disabled = true;
+    setAvatarModalStatus('Uploading new profile photo...');
+    const imageBase64 = await fileToBase64(file);
+    const data = await api(`/api/users/${encodeURIComponent(pendingAvatarUser.name)}/avatar`, {
+      method: 'POST',
+      body: {
+        image_base64: imageBase64,
+        content_type: file.type || 'application/octet-stream',
+        filename: file.name || 'avatar'
+      }
+    });
+
+    const patch = {
+      avatar_url: data?.avatar_url || null,
+      avatar_thumbnail_url: data?.avatar_thumbnail_url || null,
+      avatar_download_url: data?.avatar_download_url || null
+    };
+    pendingAvatarUser = {
+      ...pendingAvatarUser,
+      ...patch
+    };
+    updateUserInCurrentState(pendingAvatarUser.name, patch);
+    await refreshAvatarPreviewForUser(pendingAvatarUser);
+    renderUsers(state.users);
+    setAvatarModalStatus('Profile photo updated.');
+  } catch (err) {
+    setAvatarModalStatus(err.message || 'Failed to update profile photo.', true);
+  } finally {
+    avatarUploadBtn.disabled = false;
+    avatarRemoveBtn.disabled = false;
+    if (avatarFileInput) {
+      avatarFileInput.value = '';
+    }
+  }
+});
+
+avatarRemoveBtn.addEventListener('click', async () => {
+  if (!pendingAvatarUser) return;
+  const confirmed = window.confirm(`Remove profile photo for ${pendingAvatarUser.name}?`);
+  if (!confirmed) return;
+
+  try {
+    avatarUploadBtn.disabled = true;
+    avatarRemoveBtn.disabled = true;
+    setAvatarModalStatus('Removing profile photo...');
+    await api(`/api/users/${encodeURIComponent(pendingAvatarUser.name)}/avatar/remove`, {
+      method: 'POST'
+    });
+
+    const patch = {
+      avatar_url: null,
+      avatar_thumbnail_url: null,
+      avatar_download_url: null
+    };
+    pendingAvatarUser = {
+      ...pendingAvatarUser,
+      ...patch
+    };
+    updateUserInCurrentState(pendingAvatarUser.name, patch);
+    showAvatarFallback('No profile photo set');
+    renderUsers(state.users);
+    setAvatarModalStatus('Profile photo removed.');
+  } catch (err) {
+    setAvatarModalStatus(err.message || 'Failed to remove profile photo.', true);
+  } finally {
+    avatarUploadBtn.disabled = false;
+    avatarRemoveBtn.disabled = false;
+  }
 });
 
 document.addEventListener('click', (event) => {

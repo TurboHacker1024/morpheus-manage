@@ -300,6 +300,28 @@
       </div>
     </div>
 
+    <div class="modal hidden" id="avatarModal" aria-hidden="true">
+      <div class="modal-card avatar-modal-card">
+        <p class="modal-tag">Profile photo</p>
+        <h3 id="avatarModalTitle">User avatar</h3>
+        <p class="modal-text" id="avatarModalSubtitle">Manage profile photo for this account.</p>
+        <div class="avatar-preview-shell">
+          <img id="avatarModalImage" alt="User avatar preview" class="avatar-preview-image hidden" />
+          <div id="avatarModalFallback" class="avatar-preview-fallback">No profile photo</div>
+        </div>
+        <label>
+          Set new photo
+          <input type="file" id="avatarFileInput" accept="image/*" />
+        </label>
+        <p class="form-note" id="avatarModalStatus"></p>
+        <div class="modal-actions">
+          <button class="btn ghost danger-outline" id="avatarRemoveBtn" type="button">Remove photo</button>
+          <button class="btn primary" id="avatarUploadBtn" type="button">Set new photo</button>
+          <button class="btn ghost" id="avatarCloseBtn" type="button">Close</button>
+        </div>
+      </div>
+    </div>
+
     <script src="/app.js"></script>
   </body>
 </html>

@@ -40,6 +40,7 @@ const MAX_AVATAR_UPLOAD_BYTES = Math.max(
   256 * 1024,
   Number(process.env.MAX_AVATAR_UPLOAD_BYTES || 5 * 1024 * 1024)
 );
+const MEDIA_QUERY_MAX_LIMIT = Math.max(100, Number(process.env.MEDIA_QUERY_MAX_LIMIT || 500));
 
 let roomActivityCache = new Map();
 let roomCacheLoaded = false;
@@ -69,6 +70,96 @@ function getLocalpart(userId) {
   const trimmed = userId.startsWith('@') ? userId.slice(1) : userId;
   const parts = trimmed.split(':');
   return parts[0] || trimmed;
+}
+
+function extractRoomMemberIds(payload) {
+  if (!payload) return [];
+
+  if (Array.isArray(payload.members)) {
+    return payload.members
+      .map((member) => (typeof member === 'string' ? member : member?.user_id))
+      .filter(Boolean);
+  }
+
+  if (Array.isArray(payload.joined)) {
+    return payload.joined
+      .map((member) => (typeof member === 'string' ? member : member?.user_id))
+      .filter(Boolean);
+  }
+
+  if (payload.joined && typeof payload.joined === 'object') {
+    return Object.keys(payload.joined);
+  }
+
+  return [];
+}
+
+function isAlreadyJoinedError(err) {
+  const text = String(err?.data?.error || err?.message || '').toLowerCase();
+  if (!text) return false;
+  return text.includes('already in room') || text.includes('already joined');
+}
+
+function isNoEventToPurgeError(err) {
+  const text = String(err?.data?.error || err?.message || '').toLowerCase();
+  return err?.status === 404 && text.includes('no event to be purged');
+}
+
+async function joinRoomAsModeratorUser(roomId, userId) {
+  const encodedRoomId = encodeURIComponent(roomId);
+  const attempts = [];
+  const methods = [
+    {
+      key: 'admin_v1_join',
+      endpoint: `/_synapse/admin/v1/join/${encodedRoomId}`,
+      body: { user_id: userId }
+    },
+    {
+      key: 'client_v3_join',
+      endpoint: `/_matrix/client/v3/join/${encodedRoomId}`,
+      body: {}
+    },
+    {
+      key: 'client_r0_join',
+      endpoint: `/_matrix/client/r0/join/${encodedRoomId}`,
+      body: {}
+    }
+  ];
+
+  for (const method of methods) {
+    try {
+      await synapseRequest('POST', method.endpoint, method.body);
+      return {
+        method: method.key,
+        attempts
+      };
+    } catch (err) {
+      if (isAlreadyJoinedError(err)) {
+        return {
+          method: method.key,
+          already_joined: true,
+          attempts
+        };
+      }
+
+      attempts.push({
+        method: method.key,
+        status: err.status || null,
+        message: err.message || 'Join failed.',
+        details: sanitizeForLog(err.data || null)
+      });
+
+      if (err.status !== 404) {
+        err.joinAttempts = attempts;
+        throw err;
+      }
+    }
+  }
+
+  const notFoundError = new Error('No supported join endpoint was found on this Synapse instance.');
+  notFoundError.status = 404;
+  notFoundError.data = { attempts };
+  throw notFoundError;
 }
 
 function getDisplaySortKey(user) {
@@ -251,6 +342,130 @@ function buildAvatarDownloadPath(mxc) {
   const parsed = parseMxcUri(mxc);
   if (!parsed) return null;
   return `/api/media/download?mxc=${encodeURIComponent(mxc)}`;
+}
+
+function buildMxcUri(server, mediaId) {
+  const origin = String(server || '').trim();
+  const id = String(mediaId || '').trim();
+  if (!origin || !id) return null;
+  return `mxc://${origin}/${id}`;
+}
+
+function parseSortDirection(value, fallback = 'f') {
+  return String(value || '').toLowerCase() === 'b' ? 'b' : fallback;
+}
+
+function parsePositiveInteger(value, fallback, min = 0) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.max(min, Math.floor(numeric));
+}
+
+function parseBooleanInput(value, fallback = false) {
+  if (value === undefined || value === null || value === '') {
+    return fallback;
+  }
+  if (typeof value === 'boolean') return value;
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'on'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'off'].includes(normalized)) return false;
+  return fallback;
+}
+
+function parsePagedQuery(req, defaults = {}) {
+  const defaultLimit = parsePositiveInteger(defaults.limit, 50, 1);
+  const maxLimit = parsePositiveInteger(defaults.maxLimit, MEDIA_QUERY_MAX_LIMIT, 1);
+  const defaultFrom = parsePositiveInteger(defaults.from, 0, 0);
+  const from = parsePositiveInteger(req.query?.from, defaultFrom, 0);
+  const limit = Math.min(maxLimit, parsePositiveInteger(req.query?.limit, defaultLimit, 1));
+  return { from, limit };
+}
+
+function normalizeOrderBy(value, allowed, fallback) {
+  const normalized = String(value || '').trim().toLowerCase();
+  return allowed.includes(normalized) ? normalized : fallback;
+}
+
+function filterSearchTerm(items, query, mapper) {
+  const q = String(query || '').trim().toLowerCase();
+  if (!q) return items;
+  return items.filter((item) => String(mapper(item) || '').toLowerCase().includes(q));
+}
+
+function getMediaPreviewPayload(mxc) {
+  return {
+    mxc: mxc || null,
+    thumbnail_url: mxc ? buildAvatarThumbnailPath(mxc, 128) : null,
+    download_url: mxc ? buildAvatarDownloadPath(mxc) : null
+  };
+}
+
+function parseMediaReference(value, fallbackOrigin = null) {
+  if (!value) return null;
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return null;
+
+    if (trimmed.startsWith('mxc://')) {
+      const parsed = parseMxcUri(trimmed);
+      if (!parsed) return null;
+      return {
+        origin: parsed.server,
+        media_id: parsed.mediaId,
+        mxc: trimmed
+      };
+    }
+
+    if (trimmed.includes('/')) {
+      const slashIndex = trimmed.indexOf('/');
+      const origin = trimmed.slice(0, slashIndex);
+      const mediaId = trimmed.slice(slashIndex + 1);
+      if (origin && mediaId) {
+        return {
+          origin,
+          media_id: mediaId,
+          mxc: buildMxcUri(origin, mediaId)
+        };
+      }
+    }
+
+    if (fallbackOrigin) {
+      return {
+        origin: fallbackOrigin,
+        media_id: trimmed,
+        mxc: buildMxcUri(fallbackOrigin, trimmed)
+      };
+    }
+
+    return null;
+  }
+
+  if (typeof value === 'object') {
+    const mxcValue = value.mxc || value.mxc_uri || value.content_uri || null;
+    if (typeof mxcValue === 'string' && mxcValue.startsWith('mxc://')) {
+      const parsed = parseMxcUri(mxcValue);
+      if (parsed) {
+        return {
+          origin: parsed.server,
+          media_id: parsed.mediaId,
+          mxc: mxcValue
+        };
+      }
+    }
+
+    const origin = value.origin || value.server_name || fallbackOrigin || null;
+    const mediaId = value.media_id || value.id || null;
+    if (origin && mediaId) {
+      return {
+        origin,
+        media_id: mediaId,
+        mxc: buildMxcUri(origin, mediaId)
+      };
+    }
+  }
+
+  return null;
 }
 
 function createActionId() {
@@ -806,6 +1021,39 @@ async function sendProxiedMediaResponse(res, upstream, fallbackType) {
   res.send(body);
 }
 
+async function fetchMediaMetadata(origin, mediaId, options = {}) {
+  const { allowNotFound = false } = options;
+  try {
+    const data = await synapseRequest(
+      'GET',
+      `/_synapse/admin/v1/media/${encodeURIComponent(origin)}/${encodeURIComponent(mediaId)}`
+    );
+    return data || {};
+  } catch (err) {
+    if (allowNotFound && err.status === 404) {
+      return null;
+    }
+    throw err;
+  }
+}
+
+function buildMediaItem(origin, mediaId, metadata) {
+  const mxc = buildMxcUri(origin, mediaId);
+  return {
+    origin: origin || null,
+    media_id: mediaId || null,
+    ...getMediaPreviewPayload(mxc),
+    is_local: String(origin || '').toLowerCase() === String(SYNAPSE_SERVER_NAME || '').toLowerCase(),
+    media_type: metadata?.media_type || null,
+    media_length: Number(metadata?.media_length || 0),
+    upload_name: metadata?.upload_name || null,
+    created_ts: Number(metadata?.created_ts || 0) || null,
+    last_access_ts: Number(metadata?.last_access_ts || 0) || null,
+    quarantined_by: metadata?.quarantined_by || null,
+    safe_from_quarantine: Boolean(metadata?.safe_from_quarantine)
+  };
+}
+
 function toTimestamp(value) {
   if (value === undefined || value === null || value === '') return null;
   const numeric = Number(value);
@@ -1136,6 +1384,617 @@ app.get('/api/media/download', async (req, res, next) => {
 
     await sendProxiedMediaResponse(res, result.upstream, 'application/octet-stream');
   } catch (err) {
+    next(err);
+  }
+});
+
+app.get('/api/media/storage/users', async (req, res, next) => {
+  try {
+    const { from, limit } = parsePagedQuery(req, { from: 0, limit: 25, maxLimit: MEDIA_QUERY_MAX_LIMIT });
+    const orderBy = normalizeOrderBy(
+      req.query?.order_by,
+      ['user_id', 'displayname', 'media_length', 'media_count'],
+      'media_length'
+    );
+    const dir = parseSortDirection(req.query?.dir, 'b');
+    const fromTs = toTimestamp(req.query?.from_ts);
+    const untilTs = toTimestamp(req.query?.until_ts);
+    const searchTerm = String(req.query?.search_term || req.query?.q || '').trim();
+
+    const data = await synapseRequest('GET', '/_synapse/admin/v1/statistics/users/media', null, {
+      from,
+      limit,
+      order_by: orderBy,
+      dir,
+      from_ts: fromTs || undefined,
+      until_ts: untilTs || undefined,
+      search_term: searchTerm || undefined
+    });
+
+    const users = Array.isArray(data?.users) ? data.users : [];
+    const totalMediaCount = users.reduce((acc, user) => acc + Number(user?.media_count || 0), 0);
+    const totalMediaLength = users.reduce((acc, user) => acc + Number(user?.media_length || 0), 0);
+
+    res.json({
+      from,
+      limit,
+      total: Number(data?.total ?? users.length),
+      next_token: data?.next_token ?? data?.next_batch ?? null,
+      order_by: orderBy,
+      dir,
+      users: users.map((user) => ({
+        user_id: user?.user_id || null,
+        displayname: user?.displayname || null,
+        media_count: Number(user?.media_count || 0),
+        media_length: Number(user?.media_length || 0)
+      })),
+      page_summary: {
+        media_count: totalMediaCount,
+        media_length: totalMediaLength
+      }
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get('/api/media/users/:userId/media', async (req, res, next) => {
+  try {
+    const userId = req.params.userId;
+    const { from, limit } = parsePagedQuery(req, { from: 0, limit: 25, maxLimit: MEDIA_QUERY_MAX_LIMIT });
+    const orderBy = normalizeOrderBy(
+      req.query?.order_by,
+      ['created_ts', 'last_access_ts', 'media_length', 'media_type', 'upload_name', 'media_id'],
+      'created_ts'
+    );
+    const dir = parseSortDirection(req.query?.dir, 'b');
+    const query = String(req.query?.q || '').trim();
+
+    const data = await synapseRequest(
+      'GET',
+      `/_synapse/admin/v1/users/${encodeURIComponent(userId)}/media`,
+      null,
+      {
+        from,
+        limit,
+        order_by: orderBy,
+        dir
+      }
+    );
+
+    let media = Array.isArray(data?.media) ? data.media : [];
+    if (query) {
+      media = filterSearchTerm(media, query, (item) =>
+        [
+          item?.media_id,
+          item?.upload_name,
+          item?.media_type,
+          buildMxcUri(SYNAPSE_SERVER_NAME, item?.media_id)
+        ]
+          .filter(Boolean)
+          .join(' ')
+      );
+    }
+
+    res.json({
+      user_id: userId,
+      from,
+      limit,
+      total: Number(data?.total ?? media.length),
+      next_token: data?.next_token ?? data?.next_batch ?? null,
+      order_by: orderBy,
+      dir,
+      search_applied_to_page_only: Boolean(query),
+      media: media.map((item) => {
+        const mediaId = String(item?.media_id || '');
+        const mxc = buildMxcUri(SYNAPSE_SERVER_NAME, mediaId);
+        return {
+          media_id: mediaId || null,
+          ...getMediaPreviewPayload(mxc),
+          media_type: item?.media_type || null,
+          media_length: Number(item?.media_length || 0),
+          upload_name: item?.upload_name || null,
+          created_ts: Number(item?.created_ts || 0) || null,
+          last_access_ts: Number(item?.last_access_ts || 0) || null,
+          quarantined_by: item?.quarantined_by || null,
+          safe_from_quarantine: Boolean(item?.safe_from_quarantine),
+          origin: SYNAPSE_SERVER_NAME,
+          is_local: true
+        };
+      })
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.delete('/api/media/users/:userId/media', async (req, res, next) => {
+  const startedAt = Date.now();
+  try {
+    const userId = req.params.userId;
+    const beforeTs = toTimestamp(req.body?.before_ts ?? req.query?.before_ts);
+    const sizeGtRaw = req.body?.size_gt ?? req.query?.size_gt;
+    const keepProfilesRaw = req.body?.keep_profiles ?? req.query?.keep_profiles;
+    const sizeGt = Number.isFinite(Number(sizeGtRaw)) ? Math.max(0, Number(sizeGtRaw)) : undefined;
+    const keepProfiles =
+      keepProfilesRaw === undefined ? undefined : ['1', 'true', 'yes'].includes(String(keepProfilesRaw).toLowerCase());
+
+    const result = await synapseRequest(
+      'DELETE',
+      `/_synapse/admin/v1/users/${encodeURIComponent(userId)}/media`,
+      null,
+      {
+        before_ts: beforeTs || undefined,
+        size_gt: sizeGt,
+        keep_profiles: keepProfiles
+      }
+    );
+
+    logAdminAction({
+      req,
+      action: 'media.delete_user_media',
+      title: 'Delete user media',
+      module: 'media',
+      risk: 'destructive',
+      status: 'success',
+      targetType: 'user',
+      targetId: userId,
+      request: {
+        user_id: userId,
+        before_ts: beforeTs || null,
+        size_gt: sizeGt ?? null,
+        keep_profiles: keepProfiles ?? null
+      },
+      result: {
+        deleted_media: Number(result?.deleted_media || 0),
+        total: Number(result?.total || 0)
+      },
+      startedAt
+    });
+
+    res.json(result || { ok: true });
+  } catch (err) {
+    logAdminAction({
+      req,
+      action: 'media.delete_user_media',
+      title: 'Delete user media',
+      module: 'media',
+      risk: 'destructive',
+      status: 'error',
+      targetType: 'user',
+      targetId: req.params.userId,
+      request: {
+        user_id: req.params.userId
+      },
+      error: err,
+      startedAt
+    });
+    next(err);
+  }
+});
+
+app.get('/api/media/rooms/:roomId/inventory', async (req, res, next) => {
+  try {
+    const roomId = req.params.roomId;
+    const source = normalizeOrderBy(req.query?.source, ['all', 'local', 'remote'], 'all');
+    const includeDetails = String(req.query?.include_details || 'true').toLowerCase() !== 'false';
+    const query = String(req.query?.q || '').trim();
+    const { from, limit } = parsePagedQuery(req, { from: 0, limit: 50, maxLimit: 250 });
+
+    const data = await synapseRequest(
+      'GET',
+      `/_synapse/admin/v1/room/${encodeURIComponent(roomId)}/media`
+    );
+
+    const localMedia = Array.isArray(data?.local) ? data.local : [];
+    const remoteMedia = Array.isArray(data?.remote) ? data.remote : [];
+    const inventory = [];
+
+    localMedia.forEach((item) => {
+      const parsed = parseMediaReference(item, SYNAPSE_SERVER_NAME);
+      if (!parsed) return;
+      inventory.push({
+        ...parsed,
+        is_local: true
+      });
+    });
+
+    remoteMedia.forEach((item) => {
+      const parsed = parseMediaReference(item, null);
+      if (!parsed) return;
+      inventory.push({
+        ...parsed,
+        is_local: false
+      });
+    });
+
+    const deduped = new Map();
+    inventory.forEach((entry) => {
+      const key = `${entry.origin}/${entry.media_id}`;
+      if (!deduped.has(key)) {
+        deduped.set(key, entry);
+      }
+    });
+
+    let entries = Array.from(deduped.values());
+
+    if (source === 'local') {
+      entries = entries.filter((entry) => entry.is_local);
+    } else if (source === 'remote') {
+      entries = entries.filter((entry) => !entry.is_local);
+    }
+
+    if (query) {
+      entries = filterSearchTerm(entries, query, (entry) =>
+        [entry.mxc, entry.origin, entry.media_id].filter(Boolean).join(' ')
+      );
+    }
+
+    entries.sort((a, b) => {
+      const left = String(a.mxc || '').toLowerCase();
+      const right = String(b.mxc || '').toLowerCase();
+      return left.localeCompare(right, undefined, { sensitivity: 'base' });
+    });
+
+    const total = entries.length;
+    const pageEntries = entries.slice(from, from + limit);
+
+    let media = pageEntries.map((entry) => ({
+      origin: entry.origin,
+      media_id: entry.media_id,
+      is_local: entry.is_local,
+      ...getMediaPreviewPayload(entry.mxc)
+    }));
+
+    if (includeDetails && media.length) {
+      media = await Promise.all(
+        media.map(async (item) => {
+          try {
+            const metadata = await fetchMediaMetadata(item.origin, item.media_id, { allowNotFound: true });
+            if (!metadata) {
+              return {
+                ...item,
+                metadata_available: false,
+                metadata_error: 'Not found in media store metadata endpoint'
+              };
+            }
+            return {
+              ...item,
+              metadata_available: true,
+              media_type: metadata?.media_type || null,
+              media_length: Number(metadata?.media_length || 0),
+              upload_name: metadata?.upload_name || null,
+              created_ts: Number(metadata?.created_ts || 0) || null,
+              last_access_ts: Number(metadata?.last_access_ts || 0) || null,
+              quarantined_by: metadata?.quarantined_by || null,
+              safe_from_quarantine: Boolean(metadata?.safe_from_quarantine)
+            };
+          } catch (err) {
+            return {
+              ...item,
+              metadata_available: false,
+              metadata_error: err.message || 'Unable to load metadata'
+            };
+          }
+        })
+      );
+    }
+
+    const nextOffset = from + media.length;
+    res.json({
+      room_id: roomId,
+      source,
+      from,
+      limit,
+      total,
+      next_token: nextOffset < total ? String(nextOffset) : null,
+      local_count: localMedia.length,
+      remote_count: remoteMedia.length,
+      media
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get('/api/media/item', async (req, res, next) => {
+  try {
+    const mxc = String(req.query?.mxc || '');
+    const parsed = parseMxcUri(mxc);
+    if (!parsed) {
+      return res.status(400).json({ error: 'mxc query parameter is required.' });
+    }
+
+    const metadata = await fetchMediaMetadata(parsed.server, parsed.mediaId, { allowNotFound: true });
+    if (!metadata) {
+      return res.status(404).json({
+        error: 'Media metadata not found.',
+        item: {
+          origin: parsed.server,
+          media_id: parsed.mediaId,
+          ...getMediaPreviewPayload(mxc)
+        }
+      });
+    }
+
+    res.json({
+      item: buildMediaItem(parsed.server, parsed.mediaId, metadata)
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/media/item/quarantine', async (req, res, next) => {
+  const startedAt = Date.now();
+  try {
+    const mxc = String(req.body?.mxc || '').trim();
+    const parsed = parseMxcUri(mxc);
+    if (!parsed) {
+      return res.status(400).json({ error: 'mxc is required in the request body.' });
+    }
+
+    const result = await synapseRequest(
+      'POST',
+      `/_synapse/admin/v1/media/quarantine/${encodeURIComponent(parsed.server)}/${encodeURIComponent(parsed.mediaId)}`
+    );
+
+    logAdminAction({
+      req,
+      action: 'media.quarantine_item',
+      title: 'Quarantine media item',
+      module: 'media',
+      risk: 'destructive',
+      status: 'success',
+      targetType: 'media',
+      targetId: mxc,
+      request: {
+        mxc
+      },
+      result: {
+        ok: true
+      },
+      startedAt
+    });
+
+    res.json(result || { ok: true, quarantined: true, mxc });
+  } catch (err) {
+    logAdminAction({
+      req,
+      action: 'media.quarantine_item',
+      title: 'Quarantine media item',
+      module: 'media',
+      risk: 'destructive',
+      status: 'error',
+      targetType: 'media',
+      targetId: req.body?.mxc || null,
+      request: {
+        mxc: req.body?.mxc || null
+      },
+      error: err,
+      startedAt
+    });
+    next(err);
+  }
+});
+
+app.post('/api/media/item/unquarantine', async (req, res, next) => {
+  const startedAt = Date.now();
+  try {
+    const mxc = String(req.body?.mxc || '').trim();
+    const parsed = parseMxcUri(mxc);
+    if (!parsed) {
+      return res.status(400).json({ error: 'mxc is required in the request body.' });
+    }
+
+    const result = await synapseRequest(
+      'POST',
+      `/_synapse/admin/v1/media/unquarantine/${encodeURIComponent(parsed.server)}/${encodeURIComponent(parsed.mediaId)}`
+    );
+
+    logAdminAction({
+      req,
+      action: 'media.unquarantine_item',
+      title: 'Unquarantine media item',
+      module: 'media',
+      risk: 'guarded',
+      status: 'success',
+      targetType: 'media',
+      targetId: mxc,
+      request: {
+        mxc
+      },
+      result: {
+        ok: true
+      },
+      startedAt
+    });
+
+    res.json(result || { ok: true, quarantined: false, mxc });
+  } catch (err) {
+    logAdminAction({
+      req,
+      action: 'media.unquarantine_item',
+      title: 'Unquarantine media item',
+      module: 'media',
+      risk: 'guarded',
+      status: 'error',
+      targetType: 'media',
+      targetId: req.body?.mxc || null,
+      request: {
+        mxc: req.body?.mxc || null
+      },
+      error: err,
+      startedAt
+    });
+    next(err);
+  }
+});
+
+app.post('/api/media/item/delete', async (req, res, next) => {
+  const startedAt = Date.now();
+  try {
+    const mxc = String(req.body?.mxc || '').trim();
+    const parsed = parseMxcUri(mxc);
+    if (!parsed) {
+      return res.status(400).json({ error: 'mxc is required in the request body.' });
+    }
+
+    if (String(parsed.server).toLowerCase() !== String(SYNAPSE_SERVER_NAME).toLowerCase()) {
+      return res.status(400).json({
+        error: `Deleting remote media is not supported here. Only local media (${SYNAPSE_SERVER_NAME}) can be deleted.`
+      });
+    }
+
+    const result = await synapseRequest(
+      'DELETE',
+      `/_synapse/admin/v1/media/${encodeURIComponent(parsed.server)}/${encodeURIComponent(parsed.mediaId)}`
+    );
+
+    logAdminAction({
+      req,
+      action: 'media.delete_item',
+      title: 'Delete media item',
+      module: 'media',
+      risk: 'destructive',
+      status: 'success',
+      targetType: 'media',
+      targetId: mxc,
+      request: {
+        mxc
+      },
+      result: {
+        deleted: true
+      },
+      startedAt
+    });
+
+    res.json(result || { ok: true, deleted: true, mxc });
+  } catch (err) {
+    logAdminAction({
+      req,
+      action: 'media.delete_item',
+      title: 'Delete media item',
+      module: 'media',
+      risk: 'destructive',
+      status: 'error',
+      targetType: 'media',
+      targetId: req.body?.mxc || null,
+      request: {
+        mxc: req.body?.mxc || null
+      },
+      error: err,
+      startedAt
+    });
+    next(err);
+  }
+});
+
+app.get('/api/reports', async (req, res, next) => {
+  try {
+    const { from, limit } = parsePagedQuery(req, { from: 0, limit: 25, maxLimit: MEDIA_QUERY_MAX_LIMIT });
+    const dir = parseSortDirection(req.query?.dir, 'b');
+    const userId = String(req.query?.user_id || '').trim();
+    const roomId = String(req.query?.room_id || '').trim();
+    const senderUserId = String(req.query?.event_sender_user_id || '').trim();
+    const q = String(req.query?.q || '').trim();
+
+    const data = await synapseRequest('GET', '/_synapse/admin/v1/event_reports', null, {
+      from,
+      limit,
+      dir,
+      user_id: userId || undefined,
+      room_id: roomId || undefined,
+      event_sender_user_id: senderUserId || undefined
+    });
+
+    let eventReports = Array.isArray(data?.event_reports) ? data.event_reports : [];
+    if (q) {
+      eventReports = filterSearchTerm(eventReports, q, (report) =>
+        [
+          report?.room_id,
+          report?.event_id,
+          report?.user_id,
+          report?.sender,
+          report?.reason
+        ]
+          .filter(Boolean)
+          .join(' ')
+      );
+    }
+
+    res.json({
+      from,
+      limit,
+      total: Number(data?.total ?? eventReports.length),
+      next_token: data?.next_token ?? data?.next_batch ?? null,
+      dir,
+      search_applied_to_page_only: Boolean(q),
+      event_reports: eventReports
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get('/api/reports/:reportId', async (req, res, next) => {
+  try {
+    const reportId = Number(req.params.reportId);
+    if (!Number.isFinite(reportId) || reportId < 0) {
+      return res.status(400).json({ error: 'reportId must be a non-negative integer.' });
+    }
+    const data = await synapseRequest('GET', `/_synapse/admin/v1/event_reports/${reportId}`);
+    res.json(data || {});
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/reports/:reportId/resolve', async (req, res, next) => {
+  const startedAt = Date.now();
+  try {
+    const reportId = Number(req.params.reportId);
+    if (!Number.isFinite(reportId) || reportId < 0) {
+      return res.status(400).json({ error: 'reportId must be a non-negative integer.' });
+    }
+
+    const result = await synapseRequest('DELETE', `/_synapse/admin/v1/event_reports/${reportId}`);
+
+    logAdminAction({
+      req,
+      action: 'report.resolve',
+      title: 'Resolve event report',
+      module: 'media',
+      risk: 'guarded',
+      status: 'success',
+      targetType: 'report',
+      targetId: String(reportId),
+      request: {
+        report_id: reportId
+      },
+      result: {
+        deleted: true
+      },
+      startedAt
+    });
+
+    res.json(result || { ok: true, resolved: true, report_id: reportId });
+  } catch (err) {
+    logAdminAction({
+      req,
+      action: 'report.resolve',
+      title: 'Resolve event report',
+      module: 'media',
+      risk: 'guarded',
+      status: 'error',
+      targetType: 'report',
+      targetId: req.params.reportId,
+      request: {
+        report_id: req.params.reportId
+      },
+      error: err,
+      startedAt
+    });
     next(err);
   }
 });
@@ -2069,6 +2928,146 @@ app.get('/api/rooms/:roomId/members', async (req, res, next) => {
   }
 });
 
+app.post('/api/rooms/:roomId/join_moderator', async (req, res, next) => {
+  const startedAt = Date.now();
+  const roomId = req.params.roomId;
+  let adminUserId = null;
+  const stepResults = [];
+
+  try {
+    const whoami = await synapseRequest('GET', '/_matrix/client/v3/account/whoami');
+    adminUserId = String(whoami?.user_id || '').trim();
+
+    if (!adminUserId) {
+      const err = new Error('Unable to resolve the admin user from this access token.');
+      err.status = 500;
+      throw err;
+    }
+
+    try {
+      await synapseRequest(
+        'POST',
+        `/_synapse/admin/v1/rooms/${encodeURIComponent(roomId)}/make_room_admin`,
+        { user_id: adminUserId }
+      );
+      stepResults.push({
+        step: 'make_room_admin',
+        status: 'ok',
+        message: 'Requested moderator bootstrap for this account.'
+      });
+    } catch (err) {
+      stepResults.push({
+        step: 'make_room_admin',
+        status: 'error',
+        message: err.message || 'Failed to run make_room_admin.',
+        details: sanitizeForLog(err.data || null)
+      });
+    }
+
+    let joinError = null;
+
+    try {
+      const joinResult = await joinRoomAsModeratorUser(roomId, adminUserId);
+      stepResults.push({
+        step: 'join',
+        status: 'ok',
+        method: joinResult.method,
+        message: joinResult.already_joined
+          ? 'Moderator account is already in this room.'
+          : 'Moderator account joined the room.'
+      });
+      if (Array.isArray(joinResult.attempts) && joinResult.attempts.length) {
+        stepResults.push({
+          step: 'join_fallback_attempts',
+          status: 'info',
+          attempts: joinResult.attempts
+        });
+      }
+    } catch (err) {
+      joinError = err;
+      stepResults.push({
+        step: 'join',
+        status: 'error',
+        message: err.message || 'Join request failed.',
+        details: sanitizeForLog(err.data || null)
+      });
+      if (Array.isArray(err.joinAttempts) && err.joinAttempts.length) {
+        stepResults.push({
+          step: 'join_fallback_attempts',
+          status: 'error',
+          attempts: err.joinAttempts
+        });
+      }
+    }
+
+    const members = await synapseRequest(
+      'GET',
+      `/_synapse/admin/v1/rooms/${encodeURIComponent(roomId)}/members`
+    );
+    const memberIds = extractRoomMemberIds(members);
+    const joined = memberIds.includes(adminUserId);
+
+    if (!joined) {
+      const responseError = joinError || new Error('Moderator account is still not joined to this room.');
+      responseError.status = responseError.status || 409;
+      responseError.data = responseError.data || {
+        error:
+          'Join attempt did not succeed. This can happen when no local user has enough room power to invite/elevate this account.'
+      };
+      throw responseError;
+    }
+
+    logAdminAction({
+      req,
+      action: 'room.join_moderator',
+      title: 'Join moderator to room',
+      module: 'rooms',
+      risk: 'guarded',
+      status: 'success',
+      targetType: 'room_member',
+      targetId: `${roomId}:${adminUserId}`,
+      request: {
+        room_id: roomId
+      },
+      result: {
+        user_id: adminUserId,
+        joined: true,
+        steps: stepResults
+      },
+      startedAt
+    });
+
+    res.json({
+      ok: true,
+      room_id: roomId,
+      user_id: adminUserId,
+      joined: true,
+      steps: stepResults,
+      message: `Joined ${adminUserId} to the room.`
+    });
+  } catch (err) {
+    logAdminAction({
+      req,
+      action: 'room.join_moderator',
+      title: 'Join moderator to room',
+      module: 'rooms',
+      risk: 'guarded',
+      status: 'error',
+      targetType: 'room_member',
+      targetId: `${roomId}:${adminUserId || 'unknown'}`,
+      request: {
+        room_id: roomId
+      },
+      result: {
+        steps: stepResults
+      },
+      error: err,
+      startedAt
+    });
+    next(err);
+  }
+});
+
 app.get('/api/rooms/:roomId/details', async (req, res, next) => {
   try {
     const roomId = req.params.roomId;
@@ -2089,6 +3088,364 @@ app.get('/api/rooms/:roomId/state', async (req, res, next) => {
       'GET',
       `/_synapse/admin/v1/rooms/${encodeURIComponent(roomId)}/state`
     );
+    res.json(data || {});
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get('/api/rooms/:roomId/block', async (req, res, next) => {
+  try {
+    const roomId = req.params.roomId;
+    const data = await synapseRequest(
+      'GET',
+      `/_synapse/admin/v1/rooms/${encodeURIComponent(roomId)}/block`
+    );
+    res.json({
+      block: Boolean(data?.block),
+      user_id: data?.user_id || null
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.put('/api/rooms/:roomId/block', async (req, res, next) => {
+  const startedAt = Date.now();
+  try {
+    const roomId = req.params.roomId;
+    const block = parseBooleanInput(req.body?.block, true);
+    const data = await synapseRequest(
+      'PUT',
+      `/_synapse/admin/v1/rooms/${encodeURIComponent(roomId)}/block`,
+      { block }
+    );
+
+    logAdminAction({
+      req,
+      action: block ? 'room.block' : 'room.unblock',
+      title: block ? 'Block room' : 'Unblock room',
+      module: 'rooms',
+      risk: 'destructive',
+      status: 'success',
+      targetType: 'room',
+      targetId: roomId,
+      request: {
+        room_id: roomId,
+        block
+      },
+      result: {
+        block: Boolean(data?.block)
+      },
+      startedAt
+    });
+
+    res.json({
+      block: Boolean(data?.block),
+      user_id: data?.user_id || null
+    });
+  } catch (err) {
+    logAdminAction({
+      req,
+      action: parseBooleanInput(req.body?.block, true) ? 'room.block' : 'room.unblock',
+      title: parseBooleanInput(req.body?.block, true) ? 'Block room' : 'Unblock room',
+      module: 'rooms',
+      risk: 'destructive',
+      status: 'error',
+      targetType: 'room',
+      targetId: req.params.roomId,
+      request: {
+        room_id: req.params.roomId,
+        block: parseBooleanInput(req.body?.block, true)
+      },
+      error: err,
+      startedAt
+    });
+    next(err);
+  }
+});
+
+app.post('/api/rooms/:roomId/purge_history', async (req, res, next) => {
+  const startedAt = Date.now();
+  try {
+    const roomId = req.params.roomId;
+    const purgeUpToEventId = String(req.body?.purge_up_to_event_id || '').trim();
+    const purgeUpToTsRaw = req.body?.purge_up_to_ts;
+    const purgeUpToTs =
+      purgeUpToTsRaw !== undefined && purgeUpToTsRaw !== null && purgeUpToTsRaw !== ''
+        ? Number(purgeUpToTsRaw)
+        : null;
+
+    if (!purgeUpToEventId && !Number.isFinite(purgeUpToTs)) {
+      const error = new Error('Provide purge_up_to_ts (ms timestamp) or purge_up_to_event_id.');
+      error.status = 400;
+      throw error;
+    }
+
+    const body = {
+      delete_local_events: parseBooleanInput(req.body?.delete_local_events, false)
+    };
+
+    if (purgeUpToEventId) {
+      body.purge_up_to_event_id = purgeUpToEventId;
+    }
+    if (Number.isFinite(purgeUpToTs)) {
+      body.purge_up_to_ts = Math.max(0, Math.floor(purgeUpToTs));
+    }
+
+    const purgeEndpoint = `/_synapse/admin/v1/purge_history/${encodeURIComponent(roomId)}`;
+    let data = null;
+    const purgeRequestMeta = {
+      mode: body.purge_up_to_event_id ? 'event_id' : 'timestamp',
+      fallback_used: false,
+      resolved_event_id: null,
+      resolved_event_ts: null
+    };
+
+    try {
+      data = await synapseRequest('POST', purgeEndpoint, body);
+    } catch (err) {
+      const canTryTimestampFallback =
+        !body.purge_up_to_event_id && Number.isFinite(body.purge_up_to_ts) && isNoEventToPurgeError(err);
+
+      if (!canTryTimestampFallback) {
+        throw err;
+      }
+
+      const lookup = await synapseRequest(
+        'GET',
+        `/_synapse/admin/v1/rooms/${encodeURIComponent(roomId)}/timestamp_to_event`,
+        null,
+        {
+          ts: body.purge_up_to_ts,
+          dir: 'b'
+        }
+      );
+
+      const resolvedEventId = String(lookup?.event_id || '').trim();
+      if (!resolvedEventId) {
+        const noEventError = new Error(
+          'No purgeable event found before this cutoff on this homeserver. Try a later cutoff time.'
+        );
+        noEventError.status = 404;
+        noEventError.data = {
+          errcode: 'M_NOT_FOUND',
+          error: 'No purgeable event found before this cutoff on this homeserver.',
+          purge_up_to_ts: body.purge_up_to_ts
+        };
+        throw noEventError;
+      }
+
+      purgeRequestMeta.fallback_used = true;
+      purgeRequestMeta.mode = 'timestamp_to_event_id_fallback';
+      purgeRequestMeta.resolved_event_id = resolvedEventId;
+      purgeRequestMeta.resolved_event_ts = Number(lookup?.origin_server_ts || 0) || null;
+
+      data = await synapseRequest('POST', purgeEndpoint, {
+        delete_local_events: body.delete_local_events,
+        purge_up_to_event_id: resolvedEventId
+      });
+    }
+
+    logAdminAction({
+      req,
+      action: 'room.purge_history',
+      title: 'Start room history purge',
+      module: 'rooms',
+      risk: 'destructive',
+      status: 'success',
+      targetType: 'room',
+      targetId: roomId,
+      request: {
+        room_id: roomId,
+        purge_up_to_event_id: body.purge_up_to_event_id || null,
+        purge_up_to_ts: body.purge_up_to_ts || null,
+        delete_local_events: body.delete_local_events,
+        mode: purgeRequestMeta.mode,
+        fallback_used: purgeRequestMeta.fallback_used
+      },
+      result: {
+        purge_id: data?.purge_id || null,
+        resolved_event_id: purgeRequestMeta.resolved_event_id,
+        resolved_event_ts: purgeRequestMeta.resolved_event_ts
+      },
+      startedAt
+    });
+
+    res.json({
+      ...(data || {}),
+      mode: purgeRequestMeta.mode,
+      fallback_used: purgeRequestMeta.fallback_used,
+      resolved_event_id: purgeRequestMeta.resolved_event_id,
+      resolved_event_ts: purgeRequestMeta.resolved_event_ts
+    });
+  } catch (err) {
+    logAdminAction({
+      req,
+      action: 'room.purge_history',
+      title: 'Start room history purge',
+      module: 'rooms',
+      risk: 'destructive',
+      status: 'error',
+      targetType: 'room',
+      targetId: req.params.roomId,
+      request: {
+        room_id: req.params.roomId,
+        purge_up_to_event_id: req.body?.purge_up_to_event_id || null,
+        purge_up_to_ts: req.body?.purge_up_to_ts ?? null,
+        delete_local_events: parseBooleanInput(req.body?.delete_local_events, false)
+      },
+      error: err,
+      startedAt
+    });
+    next(err);
+  }
+});
+
+app.get('/api/rooms/purge_history/:purgeId', async (req, res, next) => {
+  try {
+    const purgeId = req.params.purgeId;
+    const data = await synapseRequest(
+      'GET',
+      `/_synapse/admin/v1/purge_history_status/${encodeURIComponent(purgeId)}`
+    );
+    res.json(data || {});
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.post('/api/rooms/:roomId/quarantine_media', async (req, res, next) => {
+  const startedAt = Date.now();
+  try {
+    const roomId = req.params.roomId;
+    const data = await synapseRequest(
+      'POST',
+      `/_synapse/admin/v1/room/${encodeURIComponent(roomId)}/media/quarantine`
+    );
+
+    logAdminAction({
+      req,
+      action: 'room.quarantine_media',
+      title: 'Quarantine room media',
+      module: 'rooms',
+      risk: 'destructive',
+      status: 'success',
+      targetType: 'room',
+      targetId: roomId,
+      request: {
+        room_id: roomId
+      },
+      result: {
+        num_quarantined: Number(data?.num_quarantined || 0)
+      },
+      startedAt
+    });
+
+    res.json(data || { ok: true });
+  } catch (err) {
+    logAdminAction({
+      req,
+      action: 'room.quarantine_media',
+      title: 'Quarantine room media',
+      module: 'rooms',
+      risk: 'destructive',
+      status: 'error',
+      targetType: 'room',
+      targetId: req.params.roomId,
+      request: {
+        room_id: req.params.roomId
+      },
+      error: err,
+      startedAt
+    });
+    next(err);
+  }
+});
+
+app.post('/api/rooms/:roomId/shutdown', async (req, res, next) => {
+  const startedAt = Date.now();
+  try {
+    const roomId = req.params.roomId;
+    const body = {
+      block: parseBooleanInput(req.body?.block, true),
+      purge: parseBooleanInput(req.body?.purge, true),
+      force_purge: parseBooleanInput(req.body?.force_purge, false)
+    };
+
+    const newRoomUserId = String(req.body?.new_room_user_id || '').trim();
+    const roomName = String(req.body?.room_name || '').trim();
+    const message = String(req.body?.message || '').trim();
+
+    if (newRoomUserId) body.new_room_user_id = newRoomUserId;
+    if (roomName) body.room_name = roomName;
+    if (message) body.message = message;
+
+    const data = await synapseRequest(
+      'DELETE',
+      `/_synapse/admin/v2/rooms/${encodeURIComponent(roomId)}`,
+      body
+    );
+
+    logAdminAction({
+      req,
+      action: 'room.shutdown',
+      title: 'Shutdown room',
+      module: 'rooms',
+      risk: 'destructive',
+      status: 'success',
+      targetType: 'room',
+      targetId: roomId,
+      request: {
+        room_id: roomId,
+        block: body.block,
+        purge: body.purge,
+        force_purge: body.force_purge,
+        new_room_user_id: body.new_room_user_id || null,
+        room_name: body.room_name || null,
+        has_message: Boolean(body.message)
+      },
+      result: {
+        delete_id: data?.delete_id || null
+      },
+      startedAt
+    });
+
+    res.json(data || {});
+  } catch (err) {
+    logAdminAction({
+      req,
+      action: 'room.shutdown',
+      title: 'Shutdown room',
+      module: 'rooms',
+      risk: 'destructive',
+      status: 'error',
+      targetType: 'room',
+      targetId: req.params.roomId,
+      request: {
+        room_id: req.params.roomId,
+        block: parseBooleanInput(req.body?.block, true),
+        purge: parseBooleanInput(req.body?.purge, true),
+        force_purge: parseBooleanInput(req.body?.force_purge, false),
+        new_room_user_id: req.body?.new_room_user_id || null
+      },
+      error: err,
+      startedAt
+    });
+    next(err);
+  }
+});
+
+app.get('/api/rooms/:roomId/delete_status', async (req, res, next) => {
+  try {
+    const roomId = req.params.roomId;
+    const deleteId = String(req.query?.delete_id || '').trim();
+
+    const endpoint = deleteId
+      ? `/_synapse/admin/v2/rooms/delete_status/${encodeURIComponent(deleteId)}`
+      : `/_synapse/admin/v2/rooms/${encodeURIComponent(roomId)}/delete_status`;
+
+    const data = await synapseRequest('GET', endpoint);
     res.json(data || {});
   } catch (err) {
     next(err);

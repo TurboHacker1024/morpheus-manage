@@ -66,7 +66,7 @@ function renderHeader() {
     { label: 'Homeserver', key: 'homeserver' },
     { label: 'Users', key: 'members' },
     { label: 'Last active', key: 'last_active' },
-    { label: 'Moderate', key: 'moderate', sortable: false }
+    { label: 'Controls', key: 'controls', sortable: false }
   ];
 
   columns.forEach((col) => {
@@ -180,7 +180,7 @@ function renderRooms(rooms) {
     const moderateButton = document.createElement('button');
     moderateButton.className = 'btn ghost room-action-btn';
     moderateButton.type = 'button';
-    moderateButton.textContent = 'Moderate';
+    moderateButton.textContent = 'Controls';
     moderateButton.addEventListener('click', () => {
       const url = `/room.html?room_id=${encodeURIComponent(room.room_id)}`;
       window.location.assign(url);

@@ -25,7 +25,7 @@
             <span class="rail-icon"><img src="/icons/message-circle-outline.svg" alt="" /></span>
             <span class="rail-text">Rooms</span>
           </a>
-          <a class="rail-link" href="/media.html" data-label="Media" aria-label="Media">
+          <a class="rail-link" href="/media-storage.html" data-label="Media" aria-label="Media">
             <span class="rail-icon"><img src="/icons/image-outline.svg" alt="" /></span>
             <span class="rail-text">Media</span>
           </a>
@@ -39,22 +39,20 @@
         <div class="pane-section">
           <h2>Rooms</h2>
           <a class="pane-link" href="/rooms.html">All rooms</a>
-          <a class="pane-link active" href="#roomUsersSection">Room moderation</a>
-          <a class="pane-link" href="#roomInfoSection">Room details</a>
-          <a class="pane-link" href="#roomUsersSection">Members and actions</a>
+          <a class="pane-link active" href="/room.html">Room controls</a>
         </div>
 
-        <p class="pane-note">Kick and redact actions require explicit confirmation.</p>
+        <p class="pane-note">Block, purge, quarantine, and shutdown actions require typed confirmation.</p>
 
-        <div class="pane-footer">Use the 3-dot menu on each member for moderation actions.</div>
+        <div class="pane-footer">This page uses server-level controls that work even when your admin user is not in the room.</div>
       </aside>
 
       <main class="workspace">
         <header class="workspace-header">
           <div>
             <p class="page-eyebrow">Morpheus Manage</p>
-            <p class="page-breadcrumb">Rooms / Moderation</p>
-            <h1 class="page-title" id="roomTitle">Room moderation</h1>
+            <p class="page-breadcrumb">Rooms / Controls</p>
+            <h1 class="page-title" id="roomTitle">Room controls</h1>
             <p class="page-subtitle" id="roomSubtitle">Loading room details...</p>
           </div>
           <div class="status" id="roomDetailStatus">Loading...</div>
@@ -66,8 +64,9 @@
               <div class="card-header">
                 <div>
                   <h2>Room information</h2>
-                  <p>Membership counts, encryption status, and room complexity.</p>
+                  <p>Read-only room telemetry and block state.</p>
                 </div>
+                <button class="btn ghost" id="roomRefreshBtn" type="button">Refresh</button>
               </div>
               <div class="info-list">
                 <div class="info-item">
@@ -94,82 +93,142 @@
                   <span>State events</span>
                   <strong id="roomInfoStateCount">-</strong>
                 </div>
+                <div class="info-item">
+                  <span>Block status</span>
+                  <strong id="roomInfoBlocked">-</strong>
+                </div>
               </div>
             </div>
 
-            <div class="card" id="roomUsersSection">
+            <div class="card" id="roomControlsSection">
               <div class="card-header">
                 <div>
-                  <h2>Users</h2>
-                  <p>Current joined members.</p>
+                  <h2>Room controls</h2>
+                  <p>Server-admin controls that do not require room membership.</p>
                 </div>
               </div>
-              <div class="details-list" id="roomUsersList"></div>
+              <div class="room-control-stack">
+                <section class="room-control-group">
+                  <h3>Block or unblock room</h3>
+                  <p class="room-control-text">
+                    Blocking prevents users on this homeserver from joining the room.
+                  </p>
+                  <div class="room-control-actions">
+                    <button class="btn ghost danger-outline" id="roomBlockBtn" type="button">Block room</button>
+                    <button class="btn ghost" id="roomUnblockBtn" type="button">Unblock room</button>
+                  </div>
+                  <p class="form-note" id="roomBlockNote"></p>
+                </section>
+
+                <section class="room-control-group">
+                  <h3>Purge room history</h3>
+                  <label>
+                    Purge events before (local time)
+                    <input type="datetime-local" id="roomPurgeBefore" />
+                  </label>
+                  <label class="form-checkbox">
+                    <input type="checkbox" id="roomPurgeDeleteLocal" checked />
+                    <span>Include messages sent by local users (required for most local rooms)</span>
+                  </label>
+                  <p class="form-note">
+                    Synapse purge keeps room state events. It removes timeline history before the cutoff.
+                  </p>
+                  <label>
+                    Type PURGE to confirm
+                    <input type="text" id="roomPurgeConfirm" placeholder="PURGE" />
+                  </label>
+                  <div class="room-control-actions">
+                    <button class="btn ghost danger-outline" id="roomPurgeBtn" type="button" disabled>
+                      Start purge
+                    </button>
+                    <button class="btn ghost" id="roomPurgeStatusBtn" type="button" disabled>
+                      Refresh purge status
+                    </button>
+                  </div>
+                  <p class="form-note" id="roomPurgeNote">No purge task started in this browser session.</p>
+                </section>
+
+                <section class="room-control-group">
+                  <h3>Quarantine room media</h3>
+                  <p class="room-control-text">
+                    Quarantines all media associated with this room to stop serving it to clients.
+                  </p>
+                  <label>
+                    Type QUARANTINE to confirm
+                    <input type="text" id="roomQuarantineConfirm" placeholder="QUARANTINE" />
+                  </label>
+                  <div class="room-control-actions">
+                    <button class="btn ghost danger-outline" id="roomQuarantineBtn" type="button" disabled>
+                      Quarantine room media
+                    </button>
+                  </div>
+                  <p class="form-note" id="roomQuarantineNote"></p>
+                </section>
+
+                <section class="room-control-group danger-block">
+                  <h3>Shutdown room</h3>
+                  <p class="room-control-text">
+                    Removes local users from the room and optionally blocks/purges it from this homeserver.
+                  </p>
+                  <label class="form-checkbox">
+                    <input type="checkbox" id="roomShutdownBlock" checked />
+                    <span>Block room after shutdown</span>
+                  </label>
+                  <label class="form-checkbox">
+                    <input type="checkbox" id="roomShutdownPurge" checked />
+                    <span>Purge room data from database</span>
+                  </label>
+                  <label class="form-checkbox">
+                    <input type="checkbox" id="roomShutdownForcePurge" />
+                    <span>Force purge if normal purge fails</span>
+                  </label>
+                  <label>
+                    New-room owner MXID (optional)
+                    <input type="text" id="roomShutdownNewRoomUser" placeholder="@admin:malainia.com" />
+                  </label>
+                  <label>
+                    Notice room name (optional)
+                    <input type="text" id="roomShutdownRoomName" placeholder="Content Violation Notification" />
+                  </label>
+                  <label>
+                    Notice message (optional)
+                    <textarea
+                      id="roomShutdownMessage"
+                      rows="2"
+                      placeholder="Reason for shutdown shown in the notice room."
+                    ></textarea>
+                  </label>
+                  <label>
+                    Type full room ID to confirm
+                    <input type="text" id="roomShutdownConfirm" placeholder="!roomid:malainia.com" />
+                  </label>
+                  <div class="room-control-actions">
+                    <button class="btn primary" id="roomShutdownBtn" type="button" disabled>Shutdown room</button>
+                    <button class="btn ghost" id="roomDeleteStatusBtn" type="button" disabled>
+                      Refresh shutdown status
+                    </button>
+                  </div>
+                  <p class="form-note" id="roomShutdownNote">No shutdown task started in this browser session.</p>
+                </section>
+              </div>
             </div>
+          </section>
+
+          <section class="card" id="roomUsersSection">
+            <div class="card-header">
+              <div>
+                <h2>Member directory</h2>
+                <p>Read-only member list from room state.</p>
+              </div>
+            </div>
+            <label class="room-member-filter">
+              Search members
+              <input type="search" id="roomUsersSearch" placeholder="@user:server" />
+            </label>
+            <div class="details-list" id="roomUsersList"></div>
           </section>
         </div>
       </main>
-    </div>
-
-    <div class="modal hidden" id="roomKickModal" aria-hidden="true">
-      <div class="modal-card">
-        <p class="modal-tag">Room action</p>
-        <h3>Kick user from room</h3>
-        <p class="modal-text">Removes the user from the room immediately.</p>
-        <div class="modal-warning" id="roomKickTarget"></div>
-        <label>
-          Type the full MXID to confirm
-          <input type="text" id="roomKickConfirm" placeholder="@user:example.com" />
-        </label>
-        <div class="modal-actions">
-          <button class="btn ghost" id="roomKickCancel">Cancel</button>
-          <button class="btn primary" id="roomKickConfirmBtn" disabled>Kick user</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="modal hidden" id="roomPowerModal" aria-hidden="true">
-      <div class="modal-card">
-        <p class="modal-tag">Room action</p>
-        <h3>Change power level</h3>
-        <p class="modal-text">Set the power level for this user in the room.</p>
-        <div class="modal-warning" id="roomPowerTarget"></div>
-        <label>
-          Power level
-          <input type="number" id="roomPowerValue" placeholder="50" />
-        </label>
-        <label>
-          Type the full MXID to confirm
-          <input type="text" id="roomPowerConfirm" placeholder="@user:example.com" />
-        </label>
-        <div class="modal-actions">
-          <button class="btn ghost" id="roomPowerCancel">Cancel</button>
-          <button class="btn primary" id="roomPowerConfirmBtn" disabled>Update power</button>
-        </div>
-      </div>
-    </div>
-
-    <div class="modal hidden" id="roomRedactModal" aria-hidden="true">
-      <div class="modal-card">
-        <p class="modal-tag">Danger zone</p>
-        <h3>Remove user messages?</h3>
-        <p class="modal-text">
-          This will redact all messages from the user in this room. This cannot be undone.
-        </p>
-        <div class="modal-warning" id="roomRedactTarget"></div>
-        <label>
-          Type REDACT to confirm
-          <input type="text" id="roomRedactPhrase" placeholder="REDACT" />
-        </label>
-        <label>
-          Type the full MXID to confirm
-          <input type="text" id="roomRedactConfirm" placeholder="@user:example.com" />
-        </label>
-        <div class="modal-actions">
-          <button class="btn ghost" id="roomRedactCancel">Cancel</button>
-          <button class="btn primary" id="roomRedactConfirmBtn" disabled>Redact messages</button>
-        </div>
-      </div>
     </div>
 
     <script src="/room.js"></script>

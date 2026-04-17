@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Morpheus Manage - Reported content</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body data-media-view="reports">
+    <div class="app-shell">
+      <aside class="rail">
+        <a class="rail-logo" href="/" aria-label="Morpheus Manage home">MM</a>
+        <nav class="rail-nav" aria-label="Primary navigation">
+          <a class="rail-link" href="/users.html" data-label="Users" aria-label="Users">
+            <span class="rail-icon"><img src="/icons/people-outline.svg" alt="" /></span>
+            <span class="rail-text">Users</span>
+          </a>
+          <a class="rail-link" href="/rooms.html" data-label="Rooms" aria-label="Rooms">
+            <span class="rail-icon"><img src="/icons/message-circle-outline.svg" alt="" /></span>
+            <span class="rail-text">Rooms</span>
+          </a>
+          <a class="rail-link active" href="/media-storage.html" data-label="Media" aria-label="Media">
+            <span class="rail-icon"><img src="/icons/image-outline.svg" alt="" /></span>
+            <span class="rail-text">Media</span>
+          </a>
+        </nav>
+      </aside>
+
+      <aside class="side-pane">
+        <a class="brand-link" href="/">Morpheus Manage</a>
+        <p class="pane-subtitle">Media management workspace</p>
+
+        <div class="pane-section">
+          <h2>Media</h2>
+          <a class="pane-link" href="/media-storage.html">Storage dashboard</a>
+          <a class="pane-link" href="/media-users.html">Per-user media browser</a>
+          <a class="pane-link" href="/media-rooms.html">Per-room media inventory</a>
+          <a class="pane-link active" href="/media-reports.html">Reported content moderation</a>
+        </div>
+
+        <p class="pane-note">Room inventory focuses on media visible to Synapse admin APIs and unencrypted content paths.</p>
+
+        <div class="pane-footer">Connected server: <span id="serverName">...</span></div>
+      </aside>
+
+      <main class="workspace">
+        <header class="workspace-header">
+          <div>
+            <p class="page-eyebrow">Morpheus Manage</p>
+            <p class="page-breadcrumb">Media / Reported content</p>
+            <h1 class="page-title">Reported content moderation</h1>
+            <p class="page-subtitle">
+              Work the abuse report queue and escalate directly to account controls when needed.
+            </p>
+          </div>
+          <div class="status" id="mediaStatus">Loading...</div>
+        </header>
+
+        <div class="workspace-body">
+          <section class="grid">
+            <div class="card" id="storageSection">
+              <div class="card-header">
+                <div>
+                  <h2>Storage dashboard</h2>
+                  <p>Top media usage by account, with direct jump to user media browser.</p>
+                </div>
+                <div class="pager">
+                  <button class="btn ghost" id="storagePrev">Prev</button>
+                  <span id="storagePageLabel">Page 1</span>
+                  <button class="btn ghost" id="storageNext">Next</button>
+                </div>
+              </div>
+
+              <div class="list-controls">
+                <label class="search-field">
+                  Search users
+                  <input type="search" id="storageSearch" placeholder="@mxid or display name" />
+                </label>
+                <label>
+                  Time range
+                  <select id="storageTimeRange">
+                    <option value="all" selected>All time</option>
+                    <option value="30d">Last 30 days</option>
+                    <option value="7d">Last 7 days</option>
+                    <option value="24h">Last 24 hours</option>
+                  </select>
+                </label>
+                <label>
+                  Page size
+                  <select id="storagePageSize">
+                    <option value="10">10</option>
+                    <option value="25" selected>25</option>
+                    <option value="50">50</option>
+                    <option value="100">100</option>
+                  </select>
+                </label>
+                <button class="btn" id="storageRefresh">Refresh</button>
+              </div>
+
+              <div class="actions-kpi-grid media-kpi-grid">
+                <div class="action-kpi">
+                  <span>Matched users</span>
+                  <strong id="storageKpiUsers">0</strong>
+                </div>
+                <div class="action-kpi">
+                  <span>Rows loaded</span>
+                  <strong id="storageKpiLoaded">0</strong>
+                </div>
+                <div class="action-kpi">
+                  <span>Page media items</span>
+                  <strong id="storageKpiMediaCount">0</strong>
+                </div>
+                <div class="action-kpi">
+                  <span>Page storage</span>
+                  <strong id="storageKpiMediaBytes">0 B</strong>
+                </div>
+              </div>
+
+              <div class="table media-storage-table" id="storageTable"></div>
+            </div>
+
+            <div class="card" id="userMediaSection">
+              <div class="card-header">
+                <div>
+                  <h2>Per-user media browser</h2>
+                  <p id="userMediaSubtitle">Select a user from storage dashboard to inspect uploads.</p>
+                </div>
+                <div class="pager">
+                  <button class="btn ghost" id="userMediaPrev">Prev</button>
+                  <span id="userMediaPageLabel">Page 1</span>
+                  <button class="btn ghost" id="userMediaNext">Next</button>
+                </div>
+              </div>
+
+              <div class="list-controls">
+                <label class="search-field">
+                  Search media
+                  <input type="search" id="userMediaSearch" placeholder="Media ID, filename, MIME type..." />
+                </label>
+                <label>
+                  Sort by
+                  <select id="userMediaSort">
+                    <option value="created_ts" selected>Created</option>
+                    <option value="last_access_ts">Last access</option>
+                    <option value="media_length">Size</option>
+                    <option value="media_type">Type</option>
+                    <option value="upload_name">Upload name</option>
+                    <option value="media_id">Media ID</option>
+                  </select>
+                </label>
+                <label>
+                  Direction
+                  <select id="userMediaDir">
+                    <option value="b" selected>Newest / largest first</option>
+                    <option value="f">Oldest / smallest first</option>
+                  </select>
+                </label>
+                <label>
+                  Page size
+                  <select id="userMediaPageSize">
+                    <option value="10">10</option>
+                    <option value="25" selected>25</option>
+                    <option value="50">50</option>
+                    <option value="100">100</option>
+                  </select>
+                </label>
+                <button class="btn" id="userMediaRefresh">Refresh</button>
+              </div>
+
+              <div class="table media-items-table" id="userMediaTable"></div>
+            </div>
+
+            <div class="card" id="roomMediaSection">
+              <div class="card-header">
+                <div>
+                  <h2>Per-room media inventory</h2>
+                  <p id="roomMediaSubtitle">Enter a room ID to enumerate local and remote media references.</p>
+                </div>
+                <div class="pager">
+                  <button class="btn ghost" id="roomMediaPrev">Prev</button>
+                  <span id="roomMediaPageLabel">Page 1</span>
+                  <button class="btn ghost" id="roomMediaNext">Next</button>
+                </div>
+              </div>
+
+              <div class="list-controls">
+                <label class="search-field">
+                  Room ID
+                  <input type="text" id="roomMediaRoomId" placeholder="!room:example.com" />
+                </label>
+                <label>
+                  Scope
+                  <select id="roomMediaSource">
+                    <option value="all" selected>Local + remote</option>
+                    <option value="local">Local only</option>
+                    <option value="remote">Remote only</option>
+                  </select>
+                </label>
+                <label class="search-field">
+                  Search media
+                  <input type="search" id="roomMediaSearch" placeholder="mxc, media ID, homeserver..." />
+                </label>
+                <label>
+                  Page size
+                  <select id="roomMediaPageSize">
+                    <option value="10">10</option>
+                    <option value="25" selected>25</option>
+                    <option value="50">50</option>
+                    <option value="100">100</option>
+                  </select>
+                </label>
+                <button class="btn" id="roomMediaLoad">Load inventory</button>
+              </div>
+
+              <div class="table media-items-table" id="roomMediaTable"></div>
+            </div>
+
+            <div class="card" id="reportSection">
+              <div class="card-header">
+                <div>
+                  <h2>Reported content moderation</h2>
+                  <p>Review abuse reports and resolve or escalate from one queue.</p>
+                </div>
+                <div class="pager">
+                  <button class="btn ghost" id="reportPrev">Prev</button>
+                  <span id="reportPageLabel">Page 1</span>
+                  <button class="btn ghost" id="reportNext">Next</button>
+                </div>
+              </div>
+
+              <div class="list-controls">
+                <label class="search-field">
+                  Search reports
+                  <input type="search" id="reportSearch" placeholder="Room, event, reporter, sender, reason..." />
+                </label>
+                <label>
+                  Room filter
+                  <input type="text" id="reportRoomFilter" placeholder="!room:example.com" />
+                </label>
+                <label>
+                  Reporter filter
+                  <input type="text" id="reportUserFilter" placeholder="@reporter:example.com" />
+                </label>
+                <label>
+                  Sender filter
+                  <input type="text" id="reportSenderFilter" placeholder="@sender:example.com" />
+                </label>
+                <label>
+                  Page size
+                  <select id="reportPageSize">
+                    <option value="10">10</option>
+                    <option value="25" selected>25</option>
+                    <option value="50">50</option>
+                    <option value="100">100</option>
+                  </select>
+                </label>
+                <button class="btn" id="reportRefresh">Refresh</button>
+              </div>
+
+              <div class="table report-table" id="reportTable"></div>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <div class="modal hidden" id="mediaPreviewModal" aria-hidden="true">
+      <div class="modal-card media-preview-modal-card">
+        <p class="modal-tag">Media preview</p>
+        <h3 id="mediaPreviewTitle">Preview</h3>
+        <p class="modal-text" id="mediaPreviewSubtitle"></p>
+        <div class="media-preview-shell" id="mediaPreviewShell"></div>
+        <div class="info-list" id="mediaPreviewInfo"></div>
+        <div class="modal-actions">
+          <button class="btn ghost" id="mediaPreviewQuarantineBtn">Quarantine</button>
+          <button class="btn ghost danger-outline" id="mediaPreviewDeleteBtn">Delete local media</button>
+          <button class="btn ghost" id="mediaPreviewClose">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="modal hidden" id="reportModal" aria-hidden="true">
+      <div class="modal-card report-modal-card">
+        <p class="modal-tag">Reported content</p>
+        <h3 id="reportModalTitle">Report details</h3>
+        <div class="info-list" id="reportModalInfo"></div>
+        <div class="report-json-wrap">
+          <p class="modal-tag">Event JSON</p>
+          <pre id="reportModalJson">Loading...</pre>
+        </div>
+        <div class="modal-actions">
+          <button class="btn ghost" id="reportModalResolveBtn">Resolve report</button>
+          <button class="btn ghost danger-outline" id="reportModalLockBtn">Lock sender</button>
+          <button class="btn ghost" id="reportModalClose">Close</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="/media.js"></script>
+  </body>
+</html>

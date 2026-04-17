@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Morpheus Manage</title>
+    <title>Morpheus Manage - Recent actions</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -12,7 +12,7 @@
     />
     <link rel="stylesheet" href="/style.css" />
   </head>
-  <body data-home-view="system">
+  <body data-home-view="actions">
     <div class="app-shell">
       <aside class="rail">
         <a class="rail-logo" href="/" aria-label="Morpheus Manage home">MM</a>
@@ -38,8 +38,8 @@
 
         <div class="pane-section">
           <h2>Home</h2>
-          <a class="pane-link active" href="/index.html">System status</a>
-          <a class="pane-link" href="/actions.html">Recent actions</a>
+          <a class="pane-link" href="/index.html">System status</a>
+          <a class="pane-link active" href="/actions.html">Recent actions</a>
         </div>
 
         <div class="pane-footer">Use the left rail to switch modules. Use this pane to navigate inside the current module.</div>
@@ -49,11 +49,10 @@
         <header class="workspace-header">
           <div>
             <p class="page-eyebrow">Morpheus Manage</p>
-            <p class="page-breadcrumb">Home / Dashboard</p>
-            <h1 class="page-title">Control your Matrix server from one console.</h1>
+            <p class="page-breadcrumb">Home / Recent actions</p>
+            <h1 class="page-title">Recent actions</h1>
             <p class="page-subtitle">
-              Select a management area from the left rail. Each section opens a dedicated view with
-              audit-friendly controls and confirmation gates for risky actions.
+              Audit feed for admin operations, outcomes, and high-risk changes across users, rooms, and media.
             </p>
           </div>
           <div class="status" id="dashboardStatus">Loading dashboard...</div>

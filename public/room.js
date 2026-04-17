@@ -1,38 +1,52 @@
 const roomTitle = document.getElementById('roomTitle');
 const roomSubtitle = document.getElementById('roomSubtitle');
 const roomDetailStatus = document.getElementById('roomDetailStatus');
+
 const roomInfoId = document.getElementById('roomInfoId');
 const roomInfoJoined = document.getElementById('roomInfoJoined');
 const roomInfoInvited = document.getElementById('roomInfoInvited');
 const roomInfoBanned = document.getElementById('roomInfoBanned');
 const roomInfoEncryption = document.getElementById('roomInfoEncryption');
 const roomInfoStateCount = document.getElementById('roomInfoStateCount');
+const roomInfoBlocked = document.getElementById('roomInfoBlocked');
+const roomRefreshBtn = document.getElementById('roomRefreshBtn');
+
+const roomBlockBtn = document.getElementById('roomBlockBtn');
+const roomUnblockBtn = document.getElementById('roomUnblockBtn');
+const roomBlockNote = document.getElementById('roomBlockNote');
+
+const roomPurgeBefore = document.getElementById('roomPurgeBefore');
+const roomPurgeDeleteLocal = document.getElementById('roomPurgeDeleteLocal');
+const roomPurgeConfirm = document.getElementById('roomPurgeConfirm');
+const roomPurgeBtn = document.getElementById('roomPurgeBtn');
+const roomPurgeStatusBtn = document.getElementById('roomPurgeStatusBtn');
+const roomPurgeNote = document.getElementById('roomPurgeNote');
+
+const roomQuarantineConfirm = document.getElementById('roomQuarantineConfirm');
+const roomQuarantineBtn = document.getElementById('roomQuarantineBtn');
+const roomQuarantineNote = document.getElementById('roomQuarantineNote');
+
+const roomShutdownBlock = document.getElementById('roomShutdownBlock');
+const roomShutdownPurge = document.getElementById('roomShutdownPurge');
+const roomShutdownForcePurge = document.getElementById('roomShutdownForcePurge');
+const roomShutdownNewRoomUser = document.getElementById('roomShutdownNewRoomUser');
+const roomShutdownRoomName = document.getElementById('roomShutdownRoomName');
+const roomShutdownMessage = document.getElementById('roomShutdownMessage');
+const roomShutdownConfirm = document.getElementById('roomShutdownConfirm');
+const roomShutdownBtn = document.getElementById('roomShutdownBtn');
+const roomDeleteStatusBtn = document.getElementById('roomDeleteStatusBtn');
+const roomShutdownNote = document.getElementById('roomShutdownNote');
+
+const roomUsersSearch = document.getElementById('roomUsersSearch');
 const roomUsersList = document.getElementById('roomUsersList');
-const roomKickModal = document.getElementById('roomKickModal');
-const roomKickTarget = document.getElementById('roomKickTarget');
-const roomKickConfirm = document.getElementById('roomKickConfirm');
-const roomKickConfirmBtn = document.getElementById('roomKickConfirmBtn');
-const roomKickCancel = document.getElementById('roomKickCancel');
-const roomPowerModal = document.getElementById('roomPowerModal');
-const roomPowerTarget = document.getElementById('roomPowerTarget');
-const roomPowerValue = document.getElementById('roomPowerValue');
-const roomPowerConfirm = document.getElementById('roomPowerConfirm');
-const roomPowerConfirmBtn = document.getElementById('roomPowerConfirmBtn');
-const roomPowerCancel = document.getElementById('roomPowerCancel');
-const roomRedactModal = document.getElementById('roomRedactModal');
-const roomRedactTarget = document.getElementById('roomRedactTarget');
-const roomRedactPhrase = document.getElementById('roomRedactPhrase');
-const roomRedactConfirm = document.getElementById('roomRedactConfirm');
-const roomRedactConfirmBtn = document.getElementById('roomRedactConfirmBtn');
-const roomRedactCancel = document.getElementById('roomRedactCancel');
 
 const roomState = {
   roomId: null,
-  members: []
+  members: [],
+  block: null,
+  purgeId: null,
+  deleteId: null
 };
-
-let openMenuPanel = null;
-let pendingUserId = null;
 
 async function api(path, options = {}) {
   const response = await fetch(path, options);
@@ -59,71 +73,6 @@ function setStatus(message) {
   roomDetailStatus.textContent = message;
 }
 
-function renderUsers(members) {
-  if (!members.length) {
-    roomUsersList.innerHTML = '<div class="details-empty">No members found.</div>';
-    return;
-  }
-  roomUsersList.innerHTML = '';
-  members.forEach((member) => {
-    const userId = typeof member === 'string' ? member : member?.user_id || 'Unknown';
-    const item = document.createElement('div');
-    item.className = 'details-item room-user-row';
-
-    const title = document.createElement('strong');
-    title.textContent = userId;
-
-    const menuWrapper = document.createElement('div');
-    menuWrapper.className = 'menu';
-
-    const menuButton = document.createElement('button');
-    menuButton.className = 'btn ghost menu-trigger';
-    menuButton.type = 'button';
-    menuButton.textContent = '⋯';
-    menuButton.setAttribute('aria-label', 'User actions');
-
-    const menuPanel = document.createElement('div');
-    menuPanel.className = 'menu-panel';
-
-    const addMenuItem = (label, onClick, isDanger = false) => {
-      const itemButton = document.createElement('button');
-      itemButton.type = 'button';
-      itemButton.className = `menu-item${isDanger ? ' danger' : ''}`;
-      itemButton.textContent = label;
-      itemButton.addEventListener('click', () => {
-        closeMenuPanel();
-        onClick();
-      });
-      menuPanel.appendChild(itemButton);
-    };
-
-    addMenuItem('Kick from room', () => openKickModal(userId));
-    addMenuItem('Change power level', () => openPowerModal(userId));
-    addMenuItem('Remove messages', () => openRedactModal(userId), true);
-
-    menuButton.addEventListener('click', (event) => {
-      event.stopPropagation();
-      if (openMenuPanel && openMenuPanel !== menuPanel) {
-        closeMenuPanel();
-      }
-      const isOpen = menuPanel.classList.toggle('open');
-      if (isOpen) {
-        positionMenuPanel(menuPanel, menuButton);
-        openMenuPanel = menuPanel;
-      } else {
-        openMenuPanel = null;
-      }
-    });
-
-    menuWrapper.appendChild(menuButton);
-    menuWrapper.appendChild(menuPanel);
-
-    item.appendChild(title);
-    item.appendChild(menuWrapper);
-    roomUsersList.appendChild(item);
-  });
-}
-
 function countMembership(stateEvents) {
   const counts = {
     join: 0,
@@ -142,198 +91,222 @@ function countMembership(stateEvents) {
   return counts;
 }
 
-function closeMenuPanel() {
-  if (openMenuPanel) {
-    openMenuPanel.classList.remove('open');
-    openMenuPanel.style.position = '';
-    openMenuPanel.style.top = '';
-    openMenuPanel.style.left = '';
-    openMenuPanel.style.right = '';
-    openMenuPanel = null;
-  }
-}
-
-function positionMenuPanel(panel, trigger) {
-  const rect = trigger.getBoundingClientRect();
-  const panelRect = panel.getBoundingClientRect();
-
-  let top = rect.bottom + 6;
-  if (top + panelRect.height > window.innerHeight - 8) {
-    top = Math.max(8, rect.top - panelRect.height - 6);
+function renderMemberList(members) {
+  if (!members.length) {
+    roomUsersList.innerHTML = '<div class="details-empty">No members found.</div>';
+    return;
   }
 
-  let left = rect.right - panelRect.width;
-  if (left < 8) {
-    left = 8;
+  roomUsersList.innerHTML = '';
+  members.forEach((memberId) => {
+    const item = document.createElement('div');
+    item.className = 'details-item';
+
+    const title = document.createElement('strong');
+    title.textContent = memberId;
+    item.appendChild(title);
+
+    roomUsersList.appendChild(item);
+  });
+}
+
+function applyMemberFilter() {
+  const query = roomUsersSearch.value.trim().toLowerCase();
+  if (!query) {
+    renderMemberList(roomState.members);
+    return;
   }
-  if (left + panelRect.width > window.innerWidth - 8) {
-    left = Math.max(8, window.innerWidth - panelRect.width - 8);
-  }
 
-  panel.style.position = 'fixed';
-  panel.style.top = `${top}px`;
-  panel.style.left = `${left}px`;
-  panel.style.right = 'auto';
+  const filtered = roomState.members.filter((memberId) => memberId.toLowerCase().includes(query));
+  renderMemberList(filtered);
 }
 
-function openKickModal(userId) {
-  pendingUserId = userId;
-  roomKickTarget.textContent = `Target: ${userId}`;
-  roomKickConfirm.value = '';
-  roomKickConfirmBtn.disabled = true;
-  roomKickModal.classList.remove('hidden');
-  roomKickModal.setAttribute('aria-hidden', 'false');
-  roomKickConfirm.focus();
+function updateDangerStates() {
+  const purgePhraseOk = roomPurgeConfirm.value.trim().toUpperCase() === 'PURGE';
+  const hasPurgeDate = Boolean(roomPurgeBefore.value);
+  roomPurgeBtn.disabled = !(purgePhraseOk && hasPurgeDate && roomState.roomId);
+
+  const quarantinePhraseOk = roomQuarantineConfirm.value.trim().toUpperCase() === 'QUARANTINE';
+  roomQuarantineBtn.disabled = !(quarantinePhraseOk && roomState.roomId);
+
+  const shutdownConfirmed = roomShutdownConfirm.value.trim() === roomState.roomId;
+  roomShutdownBtn.disabled = !(shutdownConfirmed && roomState.roomId);
 }
 
-function closeKickModal() {
-  roomKickModal.classList.add('hidden');
-  roomKickModal.setAttribute('aria-hidden', 'true');
-  pendingUserId = null;
-  roomKickConfirm.value = '';
+function toMsTimestamp(localDatetimeValue) {
+  if (!localDatetimeValue) return null;
+  const ts = new Date(localDatetimeValue).getTime();
+  return Number.isFinite(ts) ? ts : null;
 }
 
-roomKickConfirm.addEventListener('input', () => {
-  roomKickConfirmBtn.disabled = roomKickConfirm.value.trim() !== pendingUserId;
-});
-
-roomKickCancel.addEventListener('click', () => {
-  closeKickModal();
-});
-
-roomKickConfirmBtn.addEventListener('click', async () => {
-  if (!pendingUserId || !roomState.roomId) return;
+async function withBusy(button, busyText, callback) {
+  const originalLabel = button.textContent;
+  button.disabled = true;
+  button.textContent = busyText;
   try {
-    roomKickConfirmBtn.disabled = true;
-    await api(`/api/rooms/${encodeURIComponent(roomState.roomId)}/kick`, {
-      method: 'POST',
-      body: JSON.stringify({ user_id: pendingUserId }),
-      headers: { 'Content-Type': 'application/json' }
-    });
-    await loadRoom();
-  } catch (err) {
-    setStatus(`Error: ${err.message}`);
+    await callback();
   } finally {
-    closeKickModal();
+    button.disabled = false;
+    button.textContent = originalLabel;
+    updateDangerStates();
   }
-});
-
-function openPowerModal(userId) {
-  pendingUserId = userId;
-  roomPowerTarget.textContent = `Target: ${userId}`;
-  roomPowerValue.value = '';
-  roomPowerConfirm.value = '';
-  roomPowerConfirmBtn.disabled = true;
-  roomPowerModal.classList.remove('hidden');
-  roomPowerModal.setAttribute('aria-hidden', 'false');
-  roomPowerValue.focus();
 }
 
-function closePowerModal() {
-  roomPowerModal.classList.add('hidden');
-  roomPowerModal.setAttribute('aria-hidden', 'true');
-  pendingUserId = null;
-  roomPowerValue.value = '';
-  roomPowerConfirm.value = '';
+async function refreshBlockStatus() {
+  if (!roomState.roomId) return;
+  const blockData = await api(`/api/rooms/${encodeURIComponent(roomState.roomId)}/block`);
+  roomState.block = Boolean(blockData?.block);
+  roomInfoBlocked.textContent = roomState.block ? 'Blocked' : 'Not blocked';
+  roomBlockNote.textContent = roomState.block
+    ? `Room is blocked${blockData?.user_id ? ` (by ${blockData.user_id})` : ''}.`
+    : 'Room is not blocked.';
 }
 
-function updatePowerConfirmState() {
-  const userOk = roomPowerConfirm.value.trim() === pendingUserId;
-  const levelOk = roomPowerValue.value !== '';
-  roomPowerConfirmBtn.disabled = !(userOk && levelOk);
-}
+async function updateBlockState(block) {
+  if (!roomState.roomId) return;
+  const confirmMessage = block
+    ? `Block ${roomState.roomId}? This prevents local users from joining.`
+    : `Unblock ${roomState.roomId}?`;
+  if (!window.confirm(confirmMessage)) {
+    return;
+  }
 
-roomPowerValue.addEventListener('input', updatePowerConfirmState);
-roomPowerConfirm.addEventListener('input', updatePowerConfirmState);
-
-roomPowerCancel.addEventListener('click', () => {
-  closePowerModal();
-});
-
-roomPowerConfirmBtn.addEventListener('click', async () => {
-  if (!pendingUserId || !roomState.roomId) return;
-  try {
-    roomPowerConfirmBtn.disabled = true;
-    const level = Number(roomPowerValue.value);
-    await api(`/api/rooms/${encodeURIComponent(roomState.roomId)}/power_level`, {
-      method: 'POST',
-      body: JSON.stringify({ user_id: pendingUserId, level }),
-      headers: { 'Content-Type': 'application/json' }
+  await withBusy(block ? roomBlockBtn : roomUnblockBtn, block ? 'Blocking...' : 'Unblocking...', async () => {
+    setStatus(block ? 'Blocking room...' : 'Unblocking room...');
+    await api(`/api/rooms/${encodeURIComponent(roomState.roomId)}/block`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ block })
     });
-    await loadRoom();
-  } catch (err) {
-    setStatus(`Error: ${err.message}`);
-  } finally {
-    closePowerModal();
+    await refreshBlockStatus();
+    setStatus(block ? 'Room blocked.' : 'Room unblocked.');
+  });
+}
+
+async function startPurge() {
+  if (!roomState.roomId) return;
+  const purgeTs = toMsTimestamp(roomPurgeBefore.value);
+  if (!purgeTs) {
+    throw new Error('Pick a valid purge date/time first.');
   }
-});
 
-function openRedactModal(userId) {
-  pendingUserId = userId;
-  roomRedactTarget.textContent = `Target: ${userId}`;
-  roomRedactPhrase.value = '';
-  roomRedactConfirm.value = '';
-  roomRedactConfirmBtn.disabled = true;
-  roomRedactModal.classList.remove('hidden');
-  roomRedactModal.setAttribute('aria-hidden', 'false');
-  roomRedactPhrase.focus();
-}
-
-function closeRedactModal() {
-  roomRedactModal.classList.add('hidden');
-  roomRedactModal.setAttribute('aria-hidden', 'true');
-  pendingUserId = null;
-  roomRedactPhrase.value = '';
-  roomRedactConfirm.value = '';
-}
-
-function updateRedactConfirmState() {
-  const phraseOk = roomRedactPhrase.value.trim().toUpperCase() === 'REDACT';
-  const userOk = roomRedactConfirm.value.trim() === pendingUserId;
-  roomRedactConfirmBtn.disabled = !(phraseOk && userOk);
-}
-
-roomRedactPhrase.addEventListener('input', updateRedactConfirmState);
-roomRedactConfirm.addEventListener('input', updateRedactConfirmState);
-
-roomRedactCancel.addEventListener('click', () => {
-  closeRedactModal();
-});
-
-roomRedactConfirmBtn.addEventListener('click', async () => {
-  if (!pendingUserId || !roomState.roomId) return;
-  try {
-    roomRedactConfirmBtn.disabled = true;
-    await api(`/api/rooms/${encodeURIComponent(roomState.roomId)}/redact_user`, {
+  await withBusy(roomPurgeBtn, 'Starting...', async () => {
+    setStatus('Starting purge task...');
+    const data = await api(`/api/rooms/${encodeURIComponent(roomState.roomId)}/purge_history`, {
       method: 'POST',
-      body: JSON.stringify({ user_id: pendingUserId }),
-      headers: { 'Content-Type': 'application/json' }
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        purge_up_to_ts: purgeTs,
+        delete_local_events: roomPurgeDeleteLocal.checked
+      })
     });
-    await loadRoom();
-  } catch (err) {
-    setStatus(`Error: ${err.message}`);
-  } finally {
-    closeRedactModal();
+
+    roomState.purgeId = data?.purge_id || null;
+    roomPurgeStatusBtn.disabled = !roomState.purgeId;
+    const scope = roomPurgeDeleteLocal.checked ? 'including local events' : 'excluding local events';
+    const modeDetail = data?.fallback_used
+      ? ` via event fallback (${data?.resolved_event_id || 'resolved event'})`
+      : '';
+    roomPurgeNote.textContent = roomState.purgeId
+      ? `Purge started (ID: ${roomState.purgeId}, ${scope}${modeDetail}).`
+      : `Purge request sent (${scope}).`;
+    setStatus('Purge task started.');
+  });
+}
+
+async function refreshPurgeStatus() {
+  if (!roomState.purgeId) return;
+
+  await withBusy(roomPurgeStatusBtn, 'Checking...', async () => {
+    const data = await api(`/api/rooms/purge_history/${encodeURIComponent(roomState.purgeId)}`);
+    const status = data?.status || 'unknown';
+    const errorText = data?.error ? ` Error: ${data.error}` : '';
+    roomPurgeNote.textContent = `Purge ${roomState.purgeId}: ${status}.${errorText}`;
+    setStatus(`Purge status: ${status}`);
+  });
+}
+
+async function quarantineRoomMedia() {
+  if (!roomState.roomId) return;
+
+  await withBusy(roomQuarantineBtn, 'Quarantining...', async () => {
+    setStatus('Quarantining room media...');
+    const data = await api(`/api/rooms/${encodeURIComponent(roomState.roomId)}/quarantine_media`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({})
+    });
+
+    const count = Number(data?.num_quarantined || 0);
+    roomQuarantineNote.textContent = count
+      ? `Quarantined ${count} media items.`
+      : 'Room media quarantine request completed.';
+    setStatus('Room media quarantine completed.');
+  });
+}
+
+function getDeleteStatusSummary(payload) {
+  if (!payload) return { status: 'unknown', message: '' };
+
+  if (payload.status) {
+    return {
+      status: payload.status,
+      message: payload.error || ''
+    };
   }
-});
 
-document.addEventListener('click', (event) => {
-  if (!event.target.closest('.menu')) {
-    closeMenuPanel();
+  if (Array.isArray(payload.results) && payload.results.length) {
+    const latest = payload.results[0];
+    return {
+      status: latest?.status || 'unknown',
+      message: latest?.error || ''
+    };
   }
-});
 
-window.addEventListener('resize', () => {
-  closeMenuPanel();
-});
+  return { status: 'unknown', message: '' };
+}
 
-window.addEventListener(
-  'scroll',
-  () => {
-    closeMenuPanel();
-  },
-  true
-);
+async function startShutdown() {
+  if (!roomState.roomId) return;
+
+  await withBusy(roomShutdownBtn, 'Shutting down...', async () => {
+    setStatus('Starting room shutdown...');
+    const data = await api(`/api/rooms/${encodeURIComponent(roomState.roomId)}/shutdown`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        block: roomShutdownBlock.checked,
+        purge: roomShutdownPurge.checked,
+        force_purge: roomShutdownForcePurge.checked,
+        new_room_user_id: roomShutdownNewRoomUser.value.trim() || undefined,
+        room_name: roomShutdownRoomName.value.trim() || undefined,
+        message: roomShutdownMessage.value.trim() || undefined
+      })
+    });
+
+    roomState.deleteId = data?.delete_id || null;
+    roomDeleteStatusBtn.disabled = !roomState.deleteId;
+    roomShutdownNote.textContent = roomState.deleteId
+      ? `Shutdown task started (delete_id: ${roomState.deleteId}).`
+      : 'Shutdown request submitted.';
+    setStatus('Room shutdown task started.');
+  });
+}
+
+async function refreshDeleteStatus() {
+  if (!roomState.roomId) return;
+  const query = roomState.deleteId ? `?delete_id=${encodeURIComponent(roomState.deleteId)}` : '';
+
+  await withBusy(roomDeleteStatusBtn, 'Checking...', async () => {
+    const data = await api(`/api/rooms/${encodeURIComponent(roomState.roomId)}/delete_status${query}`);
+    const summary = getDeleteStatusSummary(data);
+    const suffix = summary.message ? ` Error: ${summary.message}` : '';
+    roomShutdownNote.textContent = roomState.deleteId
+      ? `Shutdown ${roomState.deleteId}: ${summary.status}.${suffix}`
+      : `Shutdown status: ${summary.status}.${suffix}`;
+    setStatus(`Shutdown status: ${summary.status}`);
+  });
+}
 
 async function loadRoom() {
   const params = new URLSearchParams(window.location.search);
@@ -345,44 +318,126 @@ async function loadRoom() {
     return;
   }
 
-  roomTitle.textContent = 'Room moderation';
+  roomTitle.textContent = 'Room controls';
   roomSubtitle.textContent = roomId;
   roomInfoId.textContent = roomId;
   roomState.roomId = roomId;
+  roomShutdownConfirm.placeholder = roomId;
+  updateDangerStates();
 
   setStatus('Loading…');
 
   try {
-    const [details, state, members] = await Promise.all([
+    const [details, state, members, blockData] = await Promise.all([
       api(`/api/rooms/${encodeURIComponent(roomId)}/details`),
       api(`/api/rooms/${encodeURIComponent(roomId)}/state`),
-      api(`/api/rooms/${encodeURIComponent(roomId)}/members`)
+      api(`/api/rooms/${encodeURIComponent(roomId)}/members`),
+      api(`/api/rooms/${encodeURIComponent(roomId)}/block`).catch(() => null)
     ]);
 
-    const counts = countMembership(Array.isArray(state?.state) ? state.state : state);
-    const stateEvents = Array.isArray(state?.state) ? state.state : Array.isArray(state) ? state : [];
-    roomInfoStateCount.textContent = String(stateEvents.length);
+    const stateEvents = Array.isArray(state?.state) ? state.state : [];
+    const counts = countMembership(stateEvents);
+    const memberList = Array.isArray(members?.members) ? members.members : [];
 
-    roomTitle.textContent = details?.name || details?.canonical_alias || 'Room moderation';
+    roomTitle.textContent = details?.name || details?.canonical_alias || 'Room controls';
     roomInfoJoined.textContent = String(counts.join ?? 0);
     roomInfoInvited.textContent = String(counts.invite ?? 0);
     roomInfoBanned.textContent = String(counts.ban ?? 0);
+    roomInfoEncryption.textContent = details?.encryption ? 'Enabled' : 'Disabled';
+    roomInfoStateCount.textContent = String(stateEvents.length);
 
-    if (details?.encryption) {
-      roomInfoEncryption.textContent = 'Enabled';
+    if (blockData) {
+      roomState.block = Boolean(blockData?.block);
+      roomInfoBlocked.textContent = roomState.block ? 'Blocked' : 'Not blocked';
+      roomBlockNote.textContent = roomState.block
+        ? `Room is blocked${blockData?.user_id ? ` (by ${blockData.user_id})` : ''}.`
+        : 'Room is not blocked.';
     } else {
-      roomInfoEncryption.textContent = 'Disabled';
+      roomInfoBlocked.textContent = 'Unknown';
+      roomBlockNote.textContent = 'Block status endpoint unavailable on this Synapse instance.';
     }
 
-    const memberList = Array.isArray(members?.members) ? members.members : [];
     roomState.members = memberList;
-    renderUsers(memberList);
+    applyMemberFilter();
 
-    setStatus('Loaded');
+    setStatus(`Loaded ${memberList.length} members.`);
   } catch (err) {
     setStatus(`Error: ${err.message}`);
-    roomUsersList.innerHTML = '<div class="details-empty">Unable to load users.</div>';
+    roomUsersList.innerHTML = '<div class="details-empty">Unable to load room data.</div>';
   }
 }
+
+roomRefreshBtn.addEventListener('click', () => {
+  loadRoom();
+});
+
+roomBlockBtn.addEventListener('click', async () => {
+  try {
+    await updateBlockState(true);
+  } catch (err) {
+    setStatus(`Error: ${err.message}`);
+    roomBlockNote.textContent = `Error: ${err.message}`;
+  }
+});
+
+roomUnblockBtn.addEventListener('click', async () => {
+  try {
+    await updateBlockState(false);
+  } catch (err) {
+    setStatus(`Error: ${err.message}`);
+    roomBlockNote.textContent = `Error: ${err.message}`;
+  }
+});
+
+roomPurgeBtn.addEventListener('click', async () => {
+  try {
+    await startPurge();
+  } catch (err) {
+    roomPurgeNote.textContent = `Error: ${err.message}`;
+    setStatus(`Error: ${err.message}`);
+  }
+});
+
+roomPurgeStatusBtn.addEventListener('click', async () => {
+  try {
+    await refreshPurgeStatus();
+  } catch (err) {
+    roomPurgeNote.textContent = `Error: ${err.message}`;
+    setStatus(`Error: ${err.message}`);
+  }
+});
+
+roomQuarantineBtn.addEventListener('click', async () => {
+  try {
+    await quarantineRoomMedia();
+  } catch (err) {
+    roomQuarantineNote.textContent = `Error: ${err.message}`;
+    setStatus(`Error: ${err.message}`);
+  }
+});
+
+roomShutdownBtn.addEventListener('click', async () => {
+  try {
+    await startShutdown();
+  } catch (err) {
+    roomShutdownNote.textContent = `Error: ${err.message}`;
+    setStatus(`Error: ${err.message}`);
+  }
+});
+
+roomDeleteStatusBtn.addEventListener('click', async () => {
+  try {
+    await refreshDeleteStatus();
+  } catch (err) {
+    roomShutdownNote.textContent = `Error: ${err.message}`;
+    setStatus(`Error: ${err.message}`);
+  }
+});
+
+roomUsersSearch.addEventListener('input', applyMemberFilter);
+roomPurgeConfirm.addEventListener('input', updateDangerStates);
+roomPurgeBefore.addEventListener('input', updateDangerStates);
+roomQuarantineConfirm.addEventListener('input', updateDangerStates);
+roomShutdownConfirm.addEventListener('input', updateDangerStates);
 
 loadRoom();

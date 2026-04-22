@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Morpheus Manage - Sign in</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <main class="login-shell">
+      <section class="card login-card">
+        <p class="page-eyebrow">Morpheus Manage</p>
+        <p class="login-kicker">Classic Synapse admin sign-in</p>
+        <h1 class="page-title">Open the admin panel with your Matrix account.</h1>
+        <p class="page-subtitle">
+          Enter the homeserver you want to manage, then sign in with a Synapse administrator
+          account for <span id="loginServerName">that server</span>. If this install still has a
+          preconfigured fallback token, you can use that mode instead.
+        </p>
+
+        <div class="login-meta-grid">
+          <div class="login-meta-item">
+            <span>Selected homeserver</span>
+            <strong id="loginBaseUrl">...</strong>
+          </div>
+          <div class="login-meta-item">
+            <span>Password login</span>
+            <strong id="loginFlowStatus">Pending</strong>
+          </div>
+        </div>
+
+        <form class="form login-form" id="loginForm">
+          <label>
+            Homeserver URL
+            <input
+              type="text"
+              id="loginHomeserver"
+              placeholder="malainia.com or https://matrix.example.com"
+              autocomplete="url"
+              required
+            />
+          </label>
+          <label>
+            Matrix user ID or localpart
+            <input
+              type="text"
+              id="loginUser"
+              placeholder="@admin:example.com or admin"
+              autocomplete="username"
+              required
+            />
+          </label>
+          <label>
+            Password
+            <input
+              type="password"
+              id="loginPassword"
+              placeholder="Matrix account password"
+              autocomplete="current-password"
+              required
+            />
+          </label>
+          <button class="btn primary" type="submit" id="loginSubmitBtn">Sign in</button>
+        </form>
+
+        <div class="login-divider">
+          <span>Fallback</span>
+        </div>
+
+        <div class="login-fallback">
+          <p class="pane-note" id="envFallbackNote">
+            If this installation has a verified preconfigured fallback token, you can use it here
+            without entering a Matrix password.
+          </p>
+          <button class="btn ghost hidden" type="button" id="envFallbackBtn">Use preconfigured fallback token</button>
+        </div>
+
+        <div class="status login-status" id="loginStatus">Loading sign-in options...</div>
+      </section>
+    </main>
+
+    <script src="/login.js"></script>
+  </body>
+</html>

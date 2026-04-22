@@ -5,7 +5,7 @@ Local web admin UI for Synapse with focused workflows for users, rooms, media op
 ## Setup
 
 1. Install Node.js 18+.
-2. Copy `.env.example` to `.env` and fill in your admin token and server details.
+2. Copy `.env.example` to `.env` only if you want to change the local port or preconfigure an optional fallback token. You no longer need to put a homeserver in `.env`.
 3. Install dependencies:
 
 ```
@@ -22,7 +22,11 @@ Then open `http://localhost:4173` in your browser.
 
 ## Notes
 
-- This app proxies requests to the Synapse Admin API; the admin token stays on the server side.
+- This app proxies requests to the Synapse Admin API; admin access tokens stay on the server side.
+- The UI starts at `/login.html` and lets you choose the homeserver you want to manage directly from the page.
+- Classic Matrix username/password sign-in is supported for Synapse admin accounts.
+- If `SYNAPSE_BASE_URL` and `SYNAPSE_ADMIN_TOKEN` are both preconfigured and pass a Synapse admin API health check, opening the main app will skip the login page automatically and use that server-side fallback token.
+- The login page remembers the last homeserver you used in browser storage so you do not need to keep retyping it.
 - Keep Synapse Admin API access private and run this tool only on trusted hosts/networks.
 - Destructive actions require confirmation in the UI.
 
@@ -56,9 +60,9 @@ Then open `http://localhost:4173` in your browser.
 
 ## Environment variables
 
-- `SYNAPSE_BASE_URL`: Base URL for your Synapse server (e.g., `https://malainia.com`).
-- `SYNAPSE_ADMIN_TOKEN`: Admin access token (secret).
-- `SYNAPSE_SERVER_NAME`: Homeserver name (e.g., `malainia.com`).
+- `SYNAPSE_BASE_URL` (optional): Preconfigured homeserver base URL used to prefill login or enable fallback-token mode.
+- `SYNAPSE_ADMIN_TOKEN` (optional): Preconfigured fallback admin access token (secret).
+- `SYNAPSE_SERVER_NAME` (optional): Homeserver name override when it should not be derived from the selected homeserver host.
 - `PORT`: Port for this UI (default `4173`).
 - `ACTION_LOG_MAX_ENTRIES` (optional): Max retained local action feed entries (default `5000`).
 - `JSON_BODY_LIMIT` (optional): JSON request size limit, e.g. `12mb`.

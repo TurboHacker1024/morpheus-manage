@@ -1525,6 +1525,129 @@ textarea {
   display: none;
 }
 
+.status[data-tone="danger"] {
+  color: #ffd6db;
+  border-color: rgba(255, 109, 122, 0.45);
+  background: rgba(255, 109, 122, 0.12);
+}
+
+.status[data-tone="warning"] {
+  color: #fff0c4;
+  border-color: rgba(240, 201, 107, 0.4);
+  background: rgba(240, 201, 107, 0.12);
+}
+
+.status[data-tone="success"] {
+  color: #d5ffeb;
+  border-color: rgba(109, 216, 166, 0.45);
+  background: rgba(109, 216, 166, 0.12);
+}
+
+.login-shell {
+  min-height: 100vh;
+  padding: 24px;
+  display: grid;
+  place-items: center;
+}
+
+.login-card {
+  width: min(720px, 100%);
+  padding: 28px;
+  display: grid;
+  gap: 18px;
+}
+
+.login-kicker {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 0.8rem;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--accent-strong);
+}
+
+.login-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.login-meta-item {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.02);
+  display: grid;
+  gap: 6px;
+}
+
+.login-meta-item span,
+.session-mode {
+  font-family: var(--mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.login-meta-item strong,
+.session-label {
+  display: block;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.login-form {
+  gap: 14px;
+}
+
+.login-divider {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 0.76rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.login-divider::before,
+.login-divider::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 1px;
+  background: var(--border);
+}
+
+.login-fallback {
+  display: grid;
+  gap: 10px;
+}
+
+.login-status {
+  max-width: none;
+  min-width: 0;
+}
+
+.session-panel {
+  display: grid;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.session-copy {
+  display: grid;
+  gap: 5px;
+}
+
+.session-logout {
+  justify-self: start;
+}
+
 @media (max-width: 1500px) {
   .user-grid {
     grid-template-columns: 1fr;
@@ -1642,5 +1765,12 @@ textarea {
   .actions-kpi-grid {
     grid-template-columns: 1fr;
   }
-}
 
+  .login-card {
+    padding: 22px;
+  }
+
+  .login-meta-grid {
+    grid-template-columns: 1fr;
+  }
+}

@@ -1,5 +1,7 @@
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
+const { AsyncLocalStorage } = require('async_hooks');
 const express = require('express');
 const dotenv = require('dotenv');
 
@@ -7,18 +9,16 @@ dotenv.config();
 
 const app = express();
 const PORT = Number(process.env.PORT || 4173);
+app.set('trust proxy', 1);
 
-const SYNAPSE_BASE_URL = process.env.SYNAPSE_BASE_URL;
-const SYNAPSE_ADMIN_TOKEN = process.env.SYNAPSE_ADMIN_TOKEN;
-const SYNAPSE_SERVER_NAME = process.env.SYNAPSE_SERVER_NAME;
-
-if (!SYNAPSE_BASE_URL || !SYNAPSE_ADMIN_TOKEN || !SYNAPSE_SERVER_NAME) {
-  console.error('Missing required env vars. See .env.example for SYNAPSE_BASE_URL, SYNAPSE_ADMIN_TOKEN, SYNAPSE_SERVER_NAME.');
-  process.exit(1);
-}
+const DEFAULT_SYNAPSE_BASE_URL = normalizeSynapseBaseUrl(process.env.SYNAPSE_BASE_URL || '');
+const SYNAPSE_ADMIN_TOKEN = String(process.env.SYNAPSE_ADMIN_TOKEN || '').trim() || null;
+const DEFAULT_SYNAPSE_SERVER_NAME = normalizeSynapseServerName(
+  process.env.SYNAPSE_SERVER_NAME || '',
+  DEFAULT_SYNAPSE_BASE_URL
+);
 
 app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '12mb' }));
-app.use(express.static(path.join(__dirname, 'public')));
 app.use('/api', (req, res, next) => {
   res.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.set('Pragma', 'no-cache');
@@ -41,6 +41,11 @@ const MAX_AVATAR_UPLOAD_BYTES = Math.max(
   Number(process.env.MAX_AVATAR_UPLOAD_BYTES || 5 * 1024 * 1024)
 );
 const MEDIA_QUERY_MAX_LIMIT = Math.max(100, Number(process.env.MEDIA_QUERY_MAX_LIMIT || 500));
+const AUTH_COOKIE_NAME = 'morpheus_manage_session';
+const AUTH_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const LOGIN_FLOW_CACHE_TTL_MS = 60 * 1000;
+const ENV_TOKEN_STATUS_TTL_MS = 60 * 1000;
+const requestContext = new AsyncLocalStorage();
 
 let roomActivityCache = new Map();
 let roomCacheLoaded = false;
@@ -57,13 +62,488 @@ let lastRoomsListFetchError = null;
 let lastRoomRefreshStartedAt = null;
 let lastRoomRefreshFinishedAt = null;
 let lastRoomRefreshError = null;
-let synapseHealthSnapshot = {
+let synapseHealthSnapshots = new Map();
+let authSessions = new Map();
+let loginFlowsCache = new Map();
+let envTokenStatusCache = {
   checked_at: null,
-  ok: null,
-  latency_ms: null,
-  version: null,
-  error: null
+  ok: false,
+  error: null,
+  user_id: null,
+  base_url: null,
+  server_name: null
 };
+
+function normalizeSynapseBaseUrl(value) {
+  const raw = String(value || '').trim();
+  if (!raw) return null;
+
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw) ? raw : `https://${raw}`;
+
+  try {
+    const url = new URL(withScheme);
+    if (!['http:', 'https:'].includes(url.protocol)) {
+      return null;
+    }
+
+    url.username = '';
+    url.password = '';
+    url.search = '';
+    url.hash = '';
+
+    const pathname = url.pathname === '/' ? '' : url.pathname.replace(/\/+$/, '');
+    return `${url.origin}${pathname}`;
+  } catch (err) {
+    return null;
+  }
+}
+
+function deriveServerNameFromBaseUrl(baseUrl) {
+  const normalizedBaseUrl = normalizeSynapseBaseUrl(baseUrl);
+  if (!normalizedBaseUrl) return null;
+
+  try {
+    return new URL(normalizedBaseUrl).host || null;
+  } catch (err) {
+    return null;
+  }
+}
+
+function normalizeSynapseServerName(value, baseUrl = null) {
+  const raw = String(value || '').trim();
+  if (raw) return raw;
+  return deriveServerNameFromBaseUrl(baseUrl);
+}
+
+function extractServerNameFromUserId(userId) {
+  const raw = String(userId || '').trim();
+  if (!raw.startsWith('@')) return null;
+  const separatorIndex = raw.indexOf(':');
+  if (separatorIndex < 0 || separatorIndex === raw.length - 1) return null;
+  return raw.slice(separatorIndex + 1).trim() || null;
+}
+
+function getConfiguredSynapseDefaults() {
+  if (!DEFAULT_SYNAPSE_BASE_URL) return null;
+  return {
+    baseUrl: DEFAULT_SYNAPSE_BASE_URL,
+    serverName: DEFAULT_SYNAPSE_SERVER_NAME || deriveServerNameFromBaseUrl(DEFAULT_SYNAPSE_BASE_URL)
+  };
+}
+
+function getEnvFallbackConfig() {
+  const defaults = getConfiguredSynapseDefaults();
+  if (!defaults || !SYNAPSE_ADMIN_TOKEN) return null;
+  return {
+    ...defaults,
+    accessToken: SYNAPSE_ADMIN_TOKEN
+  };
+}
+
+function getContextValue(key) {
+  return requestContext.getStore()?.[key] ?? null;
+}
+
+function getCurrentBaseUrl() {
+  return getContextValue('baseUrl') || getConfiguredSynapseDefaults()?.baseUrl || null;
+}
+
+function getCurrentServerName() {
+  const contextServerName = getContextValue('serverName');
+  if (contextServerName) return contextServerName;
+
+  const contextBaseUrl = getContextValue('baseUrl');
+  if (contextBaseUrl) {
+    return deriveServerNameFromBaseUrl(contextBaseUrl);
+  }
+
+  return getConfiguredSynapseDefaults()?.serverName || null;
+}
+
+function getCurrentAccessToken() {
+  return getContextValue('accessToken') || getEnvFallbackConfig()?.accessToken || null;
+}
+
+function parseCookies(headerValue) {
+  const cookies = {};
+  const source = String(headerValue || '').trim();
+  if (!source) return cookies;
+
+  source.split(';').forEach((segment) => {
+    const separatorIndex = segment.indexOf('=');
+    if (separatorIndex <= 0) return;
+    const key = decodeURIComponent(segment.slice(0, separatorIndex).trim());
+    const value = decodeURIComponent(segment.slice(separatorIndex + 1).trim());
+    cookies[key] = value;
+  });
+
+  return cookies;
+}
+
+function isSecureRequest(req) {
+  if (req.secure) return true;
+  const forwardedProto = String(req.get('x-forwarded-proto') || '').toLowerCase();
+  return forwardedProto.split(',').map((value) => value.trim()).includes('https');
+}
+
+function buildCookieValue(name, value, options = {}) {
+  const parts = [`${name}=${encodeURIComponent(value)}`];
+  parts.push(`Path=${options.path || '/'}`);
+
+  if (options.httpOnly !== false) parts.push('HttpOnly');
+  if (options.sameSite) parts.push(`SameSite=${options.sameSite}`);
+  if (options.maxAge !== undefined) parts.push(`Max-Age=${Math.max(0, Math.floor(options.maxAge))}`);
+  if (options.secure) parts.push('Secure');
+
+  return parts.join('; ');
+}
+
+function writeSessionCookie(req, res, sessionId) {
+  res.setHeader(
+    'Set-Cookie',
+    buildCookieValue(AUTH_COOKIE_NAME, sessionId, {
+      path: '/',
+      httpOnly: true,
+      sameSite: 'Lax',
+      secure: isSecureRequest(req),
+      maxAge: Math.floor(AUTH_SESSION_TTL_MS / 1000)
+    })
+  );
+}
+
+function clearSessionCookie(req, res) {
+  res.setHeader(
+    'Set-Cookie',
+    buildCookieValue(AUTH_COOKIE_NAME, '', {
+      path: '/',
+      httpOnly: true,
+      sameSite: 'Lax',
+      secure: isSecureRequest(req),
+      maxAge: 0
+    })
+  );
+}
+
+function pruneExpiredAuthSessions() {
+  const now = Date.now();
+  authSessions.forEach((session, sessionId) => {
+    if (!session?.expires_at || session.expires_at <= now) {
+      authSessions.delete(sessionId);
+    }
+  });
+}
+
+function createAuthSession({
+  mode,
+  accessToken = null,
+  userId = null,
+  displayName = null,
+  baseUrl = null,
+  serverName = null
+}) {
+  const now = Date.now();
+  const sessionId = crypto.randomBytes(32).toString('hex');
+  const session = {
+    id: sessionId,
+    mode,
+    access_token: accessToken,
+    user_id: userId,
+    display_name: displayName,
+    base_url: normalizeSynapseBaseUrl(baseUrl),
+    server_name: normalizeSynapseServerName(serverName, baseUrl),
+    created_at: now,
+    last_used_at: now,
+    expires_at: now + AUTH_SESSION_TTL_MS
+  };
+  authSessions.set(sessionId, session);
+  return session;
+}
+
+function replaceAuthSession(req, res, sessionData) {
+  if (req.auth?.sessionId) {
+    deleteAuthSession(req.auth.sessionId);
+  }
+  const session = createAuthSession(sessionData);
+  writeSessionCookie(req, res, session.id);
+  return session;
+}
+
+function deleteAuthSession(sessionId) {
+  if (!sessionId) return null;
+  const session = authSessions.get(sessionId) || null;
+  authSessions.delete(sessionId);
+  return session;
+}
+
+function getAuthSessionFromRequest(req) {
+  pruneExpiredAuthSessions();
+
+  const cookies = parseCookies(req.headers.cookie);
+  const sessionId = cookies[AUTH_COOKIE_NAME];
+  if (!sessionId) return null;
+
+  const session = authSessions.get(sessionId);
+  if (!session) return null;
+  if (!session.expires_at || session.expires_at <= Date.now()) {
+    authSessions.delete(sessionId);
+    return null;
+  }
+
+  session.last_used_at = Date.now();
+  return session;
+}
+
+function resolveRequestAuth(req) {
+  const session = getAuthSessionFromRequest(req);
+  if (!session) {
+    return {
+      authenticated: false,
+      mode: null,
+      accessToken: null,
+      baseUrl: null,
+      serverName: null,
+      sessionId: null,
+      userId: null,
+      displayName: null
+    };
+  }
+
+  const envConfig = getEnvFallbackConfig();
+  const accessToken = session.mode === 'env_token' ? envConfig?.accessToken || null : session.access_token || null;
+  const baseUrl =
+    session.mode === 'env_token'
+      ? normalizeSynapseBaseUrl(session.base_url || envConfig?.baseUrl)
+      : normalizeSynapseBaseUrl(session.base_url);
+  const serverName = normalizeSynapseServerName(
+    session.server_name || extractServerNameFromUserId(session.user_id),
+    baseUrl || envConfig?.baseUrl || null
+  );
+
+  if (!accessToken || !baseUrl) {
+    authSessions.delete(session.id);
+    return {
+      authenticated: false,
+      mode: null,
+      accessToken: null,
+      baseUrl: null,
+      serverName: null,
+      sessionId: null,
+      userId: null,
+      displayName: null
+    };
+  }
+
+  return {
+    authenticated: true,
+    mode: session.mode,
+    accessToken,
+    baseUrl,
+    serverName,
+    sessionId: session.id,
+    userId: session.user_id || null,
+    displayName: session.display_name || null
+  };
+}
+
+function sanitizeNextPath(value) {
+  const raw = String(value || '').trim();
+  if (!raw.startsWith('/') || raw.startsWith('//')) return '/index.html';
+  if (raw === '/login.html') return '/index.html';
+  return raw;
+}
+
+function buildLoginRedirectPath(nextPath) {
+  const sanitized = sanitizeNextPath(nextPath);
+  if (!sanitized || sanitized === '/index.html') return '/login.html';
+  return `/login.html?next=${encodeURIComponent(sanitized)}`;
+}
+
+function isProtectedHtmlRequest(pathname) {
+  return pathname === '/' || pathname.endsWith('.html');
+}
+
+function getExplicitSynapseConfigFromRequest(req) {
+  const rawBaseUrl =
+    req.body?.homeserver ||
+    req.body?.base_url ||
+    req.query?.homeserver ||
+    req.query?.base_url ||
+    '';
+  const rawServerName = req.body?.server_name || req.query?.server_name || '';
+  const baseUrl = normalizeSynapseBaseUrl(rawBaseUrl);
+  if (!baseUrl) return null;
+
+  return {
+    baseUrl,
+    serverName: normalizeSynapseServerName(rawServerName, baseUrl)
+  };
+}
+
+function resolveSynapseConfigForRequest(
+  req,
+  { allowSession = true, allowExplicit = true, allowDefaults = true } = {}
+) {
+  if (allowSession && req.auth?.authenticated && req.auth.baseUrl) {
+    return {
+      baseUrl: req.auth.baseUrl,
+      serverName: req.auth.serverName || deriveServerNameFromBaseUrl(req.auth.baseUrl)
+    };
+  }
+
+  if (allowExplicit) {
+    const explicitConfig = getExplicitSynapseConfigFromRequest(req);
+    if (explicitConfig) {
+      return explicitConfig;
+    }
+  }
+
+  if (allowDefaults) {
+    return getConfiguredSynapseDefaults();
+  }
+
+  return null;
+}
+
+async function fetchMatrixLoginFlows(force = false, options = {}) {
+  const baseUrl = normalizeSynapseBaseUrl(options.baseUrl || getCurrentBaseUrl());
+  if (!baseUrl) {
+    const error = new Error('No homeserver URL was provided.');
+    error.status = 400;
+    throw error;
+  }
+
+  const now = Date.now();
+  const cached = loginFlowsCache.get(baseUrl) || null;
+  const cacheIsFresh =
+    !force &&
+    cached?.fetched_at &&
+    now - Number(cached.fetched_at) < LOGIN_FLOW_CACHE_TTL_MS;
+
+  if (cacheIsFresh && ((cached?.flows || []).length || cached?.error)) {
+    if (cached?.error) {
+      throw cached.error;
+    }
+    return cached.flows;
+  }
+
+  try {
+    const data = await synapseRequest('GET', '/_matrix/client/v3/login', null, null, {
+      accessToken: null,
+      baseUrl
+    });
+    const flows = Array.isArray(data?.flows) ? data.flows : [];
+    loginFlowsCache.set(baseUrl, {
+      fetched_at: now,
+      flows,
+      error: null
+    });
+    return flows;
+  } catch (err) {
+    loginFlowsCache.set(baseUrl, {
+      fetched_at: now,
+      flows: [],
+      error: err
+    });
+    throw err;
+  }
+}
+
+async function getEnvTokenStatus(force = false) {
+  const envConfig = getEnvFallbackConfig();
+  if (!envConfig) {
+    return {
+      checked_at: Date.now(),
+      ok: false,
+      error: 'No preconfigured fallback admin token is available.',
+      user_id: null,
+      base_url: null,
+      server_name: null
+    };
+  }
+
+  const now = Date.now();
+  const cacheIsFresh =
+    !force &&
+    envTokenStatusCache.base_url === envConfig.baseUrl &&
+    envTokenStatusCache.checked_at &&
+    now - Number(envTokenStatusCache.checked_at) < ENV_TOKEN_STATUS_TTL_MS;
+
+  if (cacheIsFresh) {
+    return envTokenStatusCache;
+  }
+
+  try {
+    await synapseRequest('GET', '/_synapse/admin/v1/server_version', null, null, {
+      accessToken: envConfig.accessToken,
+      baseUrl: envConfig.baseUrl
+    });
+
+    let userId = null;
+    try {
+      const whoami = await synapseRequest('GET', '/_matrix/client/v3/account/whoami', null, null, {
+        accessToken: envConfig.accessToken,
+        baseUrl: envConfig.baseUrl
+      });
+      userId = String(whoami?.user_id || '').trim() || null;
+    } catch (err) {
+      userId = null;
+    }
+
+    envTokenStatusCache = {
+      checked_at: Date.now(),
+      ok: true,
+      error: null,
+      user_id: userId,
+      base_url: envConfig.baseUrl,
+      server_name: extractServerNameFromUserId(userId) || envConfig.serverName || null
+    };
+  } catch (err) {
+    envTokenStatusCache = {
+      checked_at: Date.now(),
+      ok: false,
+      error: err.message || 'Fallback admin token check failed.',
+      user_id: null,
+      base_url: envConfig.baseUrl,
+      server_name: envConfig.serverName || null
+    };
+  }
+
+  return envTokenStatusCache;
+}
+
+async function tryAutoAuthenticateWithEnvToken(req, res) {
+  const envConfig = getEnvFallbackConfig();
+  if (req.auth?.authenticated || !envConfig) {
+    return false;
+  }
+
+  const envStatus = await getEnvTokenStatus();
+  if (!envStatus.ok) {
+    return false;
+  }
+
+  const session = replaceAuthSession(req, res, {
+    mode: 'env_token',
+    accessToken: null,
+    userId: envStatus.user_id || null,
+    displayName: 'Configured admin token',
+    baseUrl: envStatus.base_url || envConfig.baseUrl,
+    serverName: envStatus.server_name || envConfig.serverName || null
+  });
+
+  req.auth = {
+    authenticated: true,
+    mode: session.mode,
+    accessToken: envConfig.accessToken,
+    baseUrl: session.base_url || envStatus.base_url || null,
+    serverName: session.server_name || envStatus.server_name || null,
+    sessionId: session.id,
+    userId: session.user_id || null,
+    displayName: session.display_name || null
+  };
+
+  return true;
+}
 
 function getLocalpart(userId) {
   if (!userId) return '';
@@ -829,8 +1309,15 @@ async function fetchAllRooms() {
   return allRooms;
 }
 
-function buildSynapseUrl(endpoint, query) {
-  const base = SYNAPSE_BASE_URL.endsWith('/') ? SYNAPSE_BASE_URL : `${SYNAPSE_BASE_URL}/`;
+function buildSynapseUrl(endpoint, query, options = {}) {
+  const baseUrl = normalizeSynapseBaseUrl(options.baseUrl || getCurrentBaseUrl());
+  if (!baseUrl) {
+    const error = new Error('No homeserver URL is configured for this request.');
+    error.status = 400;
+    throw error;
+  }
+
+  const base = baseUrl.endsWith('/') ? baseUrl : `${baseUrl}/`;
   const pathPart = endpoint.replace(/^\/+/, '');
   const url = new URL(pathPart, base);
 
@@ -845,12 +1332,17 @@ function buildSynapseUrl(endpoint, query) {
   return url.toString();
 }
 
-async function synapseRequest(method, endpoint, body, query) {
-  const url = buildSynapseUrl(endpoint, query);
+async function synapseRequest(method, endpoint, body, query, options = {}) {
+  const url = buildSynapseUrl(endpoint, query, options);
   const headers = {
-    Authorization: `Bearer ${SYNAPSE_ADMIN_TOKEN}`,
     'Content-Type': 'application/json'
   };
+  const hasExplicitToken = Object.prototype.hasOwnProperty.call(options, 'accessToken');
+  const accessToken = hasExplicitToken ? options.accessToken : getCurrentAccessToken();
+
+  if (accessToken) {
+    headers.Authorization = `Bearer ${accessToken}`;
+  }
 
   const response = await fetch(url, {
     method,
@@ -893,14 +1385,18 @@ function decodeBase64Payload(payload) {
 }
 
 async function uploadSynapseMedia(buffer, contentType, filename) {
-  const uploadUrl = buildSynapseUrl('/_matrix/media/v3/upload', {
-    filename: filename || 'avatar'
-  });
+  const uploadUrl = buildSynapseUrl(
+    '/_matrix/media/v3/upload',
+    {
+      filename: filename || 'avatar'
+    }
+  );
+  const accessToken = getCurrentAccessToken();
 
   const response = await fetch(uploadUrl, {
     method: 'POST',
     headers: {
-      Authorization: `Bearer ${SYNAPSE_ADMIN_TOKEN}`,
+      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
       'Content-Type': contentType || 'application/octet-stream'
     },
     body: buffer
@@ -973,14 +1469,17 @@ function getMediaEndpointCandidates(parsed, kind) {
 async function tryFetchSynapseMedia({ parsed, kind, query = null }) {
   const attempts = [];
   const candidates = getMediaEndpointCandidates(parsed, kind);
+  const accessToken = getCurrentAccessToken();
 
   for (const endpoint of candidates) {
     const url = buildSynapseUrl(endpoint, query);
     try {
       const upstream = await fetch(url, {
-        headers: {
-          Authorization: `Bearer ${SYNAPSE_ADMIN_TOKEN}`
-        }
+        headers: accessToken
+          ? {
+              Authorization: `Bearer ${accessToken}`
+            }
+          : undefined
       });
 
       if (upstream.ok) {
@@ -1039,11 +1538,12 @@ async function fetchMediaMetadata(origin, mediaId, options = {}) {
 
 function buildMediaItem(origin, mediaId, metadata) {
   const mxc = buildMxcUri(origin, mediaId);
+  const currentServerName = getCurrentServerName();
   return {
     origin: origin || null,
     media_id: mediaId || null,
     ...getMediaPreviewPayload(mxc),
-    is_local: String(origin || '').toLowerCase() === String(SYNAPSE_SERVER_NAME || '').toLowerCase(),
+    is_local: String(origin || '').toLowerCase() === String(currentServerName || '').toLowerCase(),
     media_type: metadata?.media_type || null,
     media_length: Number(metadata?.media_length || 0),
     upload_name: metadata?.upload_name || null,
@@ -1095,36 +1595,50 @@ function summarizeActionSet(entries) {
 }
 
 async function getSynapseHealthSnapshot(force = false) {
+  const baseUrl = normalizeSynapseBaseUrl(getCurrentBaseUrl());
+  if (!baseUrl) {
+    return {
+      checked_at: Date.now(),
+      ok: false,
+      latency_ms: null,
+      version: null,
+      error: 'No homeserver URL is configured for this session.'
+    };
+  }
+
   const now = Date.now();
+  const cached = synapseHealthSnapshots.get(baseUrl) || null;
   const isFresh =
-    synapseHealthSnapshot.checked_at &&
-    now - Number(synapseHealthSnapshot.checked_at) < SYNAPSE_HEALTH_CACHE_TTL_MS;
+    cached?.checked_at &&
+    now - Number(cached.checked_at) < SYNAPSE_HEALTH_CACHE_TTL_MS;
 
   if (!force && isFresh) {
-    return synapseHealthSnapshot;
+    return cached;
   }
 
   const startedAt = Date.now();
   try {
     const data = await synapseRequest('GET', '/_synapse/admin/v1/server_version');
-    synapseHealthSnapshot = {
+    const snapshot = {
       checked_at: Date.now(),
       ok: true,
       latency_ms: Date.now() - startedAt,
       version: data?.server_version || null,
       error: null
     };
+    synapseHealthSnapshots.set(baseUrl, snapshot);
+    return snapshot;
   } catch (err) {
-    synapseHealthSnapshot = {
+    const snapshot = {
       checked_at: Date.now(),
       ok: false,
       latency_ms: Date.now() - startedAt,
       version: null,
       error: err.message || 'Synapse health check failed'
     };
+    synapseHealthSnapshots.set(baseUrl, snapshot);
+    return snapshot;
   }
-
-  return synapseHealthSnapshot;
 }
 
 function getFileStats(filePath) {
@@ -1151,10 +1665,399 @@ function getFileStats(filePath) {
   }
 }
 
-app.get('/api/config', (req, res) => {
+app.use((req, res, next) => {
+  req.auth = resolveRequestAuth(req);
+  next();
+});
+
+app.use((req, res, next) => {
+  void (async () => {
+    const pathname = req.path || '/';
+
+    if (
+      !req.auth?.authenticated &&
+      pathname !== '/login' &&
+      pathname !== '/login.html' &&
+      !pathname.startsWith('/api/') &&
+      isProtectedHtmlRequest(pathname)
+    ) {
+      await tryAutoAuthenticateWithEnvToken(req, res);
+    }
+
+    if (pathname === '/login') {
+      if (req.auth?.authenticated) {
+        return res.redirect(sanitizeNextPath(req.query?.next || '/index.html'));
+      }
+      return res.redirect(buildLoginRedirectPath(req.query?.next || '/index.html'));
+    }
+
+    if (pathname === '/login.html') {
+      if (req.auth?.authenticated) {
+        return res.redirect(sanitizeNextPath(req.query?.next || '/index.html'));
+      }
+      return next();
+    }
+
+    if (pathname.startsWith('/api/auth/')) {
+      return next();
+    }
+
+    if (pathname.startsWith('/api/')) {
+      if (!req.auth?.authenticated) {
+        return res.status(401).json({
+          error: 'Authentication required.',
+          login_required: true,
+          login_url: buildLoginRedirectPath(req.originalUrl || '/index.html')
+        });
+      }
+
+      return requestContext.run(
+        {
+          accessToken: req.auth.accessToken,
+          baseUrl: req.auth.baseUrl,
+          serverName: req.auth.serverName,
+          mode: req.auth.mode,
+          sessionId: req.auth.sessionId,
+          userId: req.auth.userId
+        },
+        () => next()
+      );
+    }
+
+    if (!req.auth?.authenticated && isProtectedHtmlRequest(pathname)) {
+      return res.redirect(buildLoginRedirectPath(req.originalUrl || pathname));
+    }
+
+    if (pathname === '/') {
+      return res.redirect('/index.html');
+    }
+
+    next();
+  })().catch(next);
+});
+
+app.get('/api/auth/status', async (req, res) => {
+  const synapseConfig = resolveSynapseConfigForRequest(req, {
+    allowSession: true,
+    allowExplicit: !req.auth?.authenticated,
+    allowDefaults: true
+  });
+  let flows = [];
+  let flowError = null;
+  const envStatus = await getEnvTokenStatus();
+
+  if (synapseConfig?.baseUrl) {
+    try {
+      flows = await fetchMatrixLoginFlows(false, { baseUrl: synapseConfig.baseUrl });
+    } catch (err) {
+      flowError = err.message || 'Unable to fetch login flows.';
+    }
+  }
+
+  const passwordSupported = flows.some((flow) => flow?.type === 'm.login.password');
+  const ssoSupported = flows.some((flow) => flow?.type === 'm.login.sso');
+
   res.json({
-    server_name: SYNAPSE_SERVER_NAME,
-    base_url: SYNAPSE_BASE_URL
+    authenticated: Boolean(req.auth?.authenticated),
+    auth_mode: req.auth?.mode || null,
+    server_name: synapseConfig?.serverName || null,
+    base_url: synapseConfig?.baseUrl || null,
+    env_fallback_available: envStatus.ok,
+    env_fallback_configured: Boolean(getEnvFallbackConfig()),
+    env_fallback_error: envStatus.ok ? null : envStatus.error,
+    session: req.auth?.authenticated
+      ? {
+          user_id: req.auth.userId || null,
+          display_name: req.auth.displayName || null,
+          base_url: req.auth.baseUrl || null,
+          server_name: req.auth.serverName || null
+        }
+      : null,
+    login: {
+      password_supported: synapseConfig?.baseUrl ? passwordSupported : null,
+      sso_supported: ssoSupported,
+      flows: flows.map((flow) => flow?.type).filter(Boolean),
+      error: flowError,
+      homeserver_required: !synapseConfig?.baseUrl
+    }
+  });
+});
+
+app.post('/api/auth/login', async (req, res, next) => {
+  const startedAt = Date.now();
+  let loginFlowProbeError = null;
+  try {
+    const synapseConfig = resolveSynapseConfigForRequest(req, {
+      allowSession: false,
+      allowExplicit: true,
+      allowDefaults: true
+    });
+    const user = String(req.body?.user || '').trim();
+    const password = String(req.body?.password || '');
+
+    if (!synapseConfig?.baseUrl) {
+      const error = new Error('Provide a homeserver URL before signing in.');
+      error.status = 400;
+      throw error;
+    }
+
+    if (!user || !password) {
+      const error = new Error('Provide a Matrix user ID or localpart and a password.');
+      error.status = 400;
+      throw error;
+    }
+
+    let flows = [];
+
+    try {
+      flows = await fetchMatrixLoginFlows(false, { baseUrl: synapseConfig.baseUrl });
+    } catch (err) {
+      loginFlowProbeError = err;
+    }
+
+    if (!loginFlowProbeError && !flows.some((flow) => flow?.type === 'm.login.password')) {
+      const error = new Error('This homeserver does not advertise password login.');
+      error.status = 400;
+      throw error;
+    }
+
+    const loginData = await synapseRequest(
+      'POST',
+      '/_matrix/client/v3/login',
+      {
+        type: 'm.login.password',
+        identifier: {
+          type: 'm.id.user',
+          user
+        },
+        password,
+        initial_device_display_name: 'Morpheus Manage'
+      },
+      null,
+      {
+        accessToken: null,
+        baseUrl: synapseConfig.baseUrl
+      }
+    );
+
+    const accessToken = String(loginData?.access_token || '').trim();
+    const userId = String(loginData?.user_id || '').trim();
+    const resolvedServerName =
+      extractServerNameFromUserId(userId) || synapseConfig.serverName || deriveServerNameFromBaseUrl(synapseConfig.baseUrl);
+
+    if (!accessToken || !userId) {
+      const error = new Error('Login succeeded but no access token was returned.');
+      error.status = 502;
+      throw error;
+    }
+
+    const adminInfo = await synapseRequest(
+      'GET',
+      `/_synapse/admin/v2/users/${encodeURIComponent(userId)}`,
+      null,
+      null,
+      {
+        accessToken,
+        baseUrl: synapseConfig.baseUrl
+      }
+    );
+
+    if (!adminInfo?.admin) {
+      const error = new Error('This Matrix account is not a Synapse administrator.');
+      error.status = 403;
+      throw error;
+    }
+
+    replaceAuthSession(req, res, {
+      mode: 'matrix_login',
+      accessToken,
+      userId,
+      displayName: adminInfo?.displayname || null,
+      baseUrl: synapseConfig.baseUrl,
+      serverName: resolvedServerName
+    });
+
+    logAdminAction({
+      req,
+      action: 'auth.login',
+      title: 'Sign in with Matrix admin account',
+      module: 'system',
+      risk: 'guarded',
+      status: 'success',
+      targetType: 'user',
+      targetId: userId,
+      request: {
+        user,
+        homeserver: synapseConfig.baseUrl,
+        login_flow_probe_error: loginFlowProbeError?.message || null
+      },
+      result: {
+        user_id: userId,
+        auth_mode: 'matrix_login',
+        base_url: synapseConfig.baseUrl,
+        server_name: resolvedServerName
+      },
+      startedAt
+    });
+
+    res.json({
+      ok: true,
+      auth_mode: 'matrix_login',
+      session: {
+        user_id: userId,
+        display_name: adminInfo?.displayname || null,
+        base_url: synapseConfig.baseUrl,
+        server_name: resolvedServerName
+      }
+    });
+  } catch (err) {
+    const requestConfig = resolveSynapseConfigForRequest(req, {
+      allowSession: false,
+      allowExplicit: true,
+      allowDefaults: true
+    });
+    logAdminAction({
+      req,
+      action: 'auth.login',
+      title: 'Sign in with Matrix admin account',
+      module: 'system',
+      risk: 'guarded',
+      status: 'error',
+      targetType: 'user',
+      targetId: String(req.body?.user || '').trim() || null,
+      request: {
+        user: String(req.body?.user || '').trim() || null,
+        homeserver: requestConfig?.baseUrl || null,
+        login_flow_probe_error: loginFlowProbeError?.message || null
+      },
+      error: err,
+      startedAt
+    });
+    next(err);
+  }
+});
+
+app.post('/api/auth/use-env', async (req, res, next) => {
+  const startedAt = Date.now();
+  try {
+    const envStatus = await getEnvTokenStatus(true);
+    if (!envStatus.ok) {
+      const error = new Error(envStatus.error || 'Fallback admin token check failed.');
+      error.status = 400;
+      throw error;
+    }
+
+    const envUserId = envStatus.user_id || null;
+
+    replaceAuthSession(req, res, {
+      mode: 'env_token',
+      accessToken: null,
+      userId: envUserId,
+      displayName: 'Configured admin token',
+      baseUrl: envStatus.base_url || null,
+      serverName: envStatus.server_name || null
+    });
+
+    logAdminAction({
+      req,
+      action: 'auth.use_env_token',
+      title: 'Use configured admin token',
+      module: 'system',
+      risk: 'guarded',
+      status: 'success',
+      targetType: 'session',
+      targetId: 'env_token',
+      result: {
+        auth_mode: 'env_token',
+        user_id: envUserId,
+        base_url: envStatus.base_url || null,
+        server_name: envStatus.server_name || null
+      },
+      startedAt
+    });
+
+    res.json({
+      ok: true,
+      auth_mode: 'env_token',
+      session: {
+        user_id: envUserId,
+        display_name: 'Configured admin token',
+        base_url: envStatus.base_url || null,
+        server_name: envStatus.server_name || null
+      }
+    });
+  } catch (err) {
+    logAdminAction({
+      req,
+      action: 'auth.use_env_token',
+      title: 'Use configured admin token',
+      module: 'system',
+      risk: 'guarded',
+      status: 'error',
+      targetType: 'session',
+      targetId: 'env_token',
+      error: err,
+      startedAt
+    });
+    next(err);
+  }
+});
+
+app.post('/api/auth/logout', async (req, res, next) => {
+  const startedAt = Date.now();
+  const existingSession = req.auth?.sessionId ? authSessions.get(req.auth.sessionId) || null : null;
+
+  try {
+    if (existingSession?.mode === 'matrix_login' && existingSession.access_token) {
+      try {
+        await synapseRequest('POST', '/_matrix/client/v3/logout', {}, null, {
+          accessToken: existingSession.access_token,
+          baseUrl: existingSession.base_url || req.auth?.baseUrl || null
+        });
+      } catch (err) {
+        // Best-effort logout. The local session is still cleared below.
+      }
+    }
+
+    if (req.auth?.sessionId) {
+      deleteAuthSession(req.auth.sessionId);
+    }
+    clearSessionCookie(req, res);
+
+    logAdminAction({
+      req,
+      action: 'auth.logout',
+      title: 'Sign out admin session',
+      module: 'system',
+      risk: 'safe',
+      status: 'success',
+      targetType: 'session',
+      targetId: req.auth?.sessionId || null,
+      result: {
+        auth_mode: existingSession?.mode || null,
+        user_id: existingSession?.user_id || null
+      },
+      startedAt
+    });
+
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+app.get('/api/config', async (req, res) => {
+  const envStatus = await getEnvTokenStatus();
+
+  res.json({
+    server_name: req.auth?.serverName || null,
+    base_url: req.auth?.baseUrl || null,
+    auth: {
+      mode: req.auth?.mode || null,
+      env_fallback_available: envStatus.ok,
+      env_fallback_configured: Boolean(getEnvFallbackConfig()),
+      env_fallback_error: envStatus.ok ? null : envStatus.error
+    }
   });
 });
 
@@ -1256,12 +2159,14 @@ app.get('/api/system/status', async (req, res, next) => {
     const roomCacheFile = getFileStats(ROOM_ACTIVITY_CACHE_FILE);
     const actionLogFile = getFileStats(ACTION_LOG_FILE);
     const memory = process.memoryUsage();
+    const currentServerName = getCurrentServerName();
+    const currentBaseUrl = getCurrentBaseUrl();
 
     res.json({
       generated_at: now,
       server: {
-        name: SYNAPSE_SERVER_NAME,
-        base_url: SYNAPSE_BASE_URL,
+        name: currentServerName,
+        base_url: currentBaseUrl,
         version: health.version || null,
         api_healthy: Boolean(health.ok),
         api_latency_ms: health.latency_ms,
@@ -1441,6 +2346,7 @@ app.get('/api/media/storage/users', async (req, res, next) => {
 app.get('/api/media/users/:userId/media', async (req, res, next) => {
   try {
     const userId = req.params.userId;
+    const currentServerName = getCurrentServerName();
     const { from, limit } = parsePagedQuery(req, { from: 0, limit: 25, maxLimit: MEDIA_QUERY_MAX_LIMIT });
     const orderBy = normalizeOrderBy(
       req.query?.order_by,
@@ -1469,7 +2375,7 @@ app.get('/api/media/users/:userId/media', async (req, res, next) => {
           item?.media_id,
           item?.upload_name,
           item?.media_type,
-          buildMxcUri(SYNAPSE_SERVER_NAME, item?.media_id)
+          buildMxcUri(currentServerName, item?.media_id)
         ]
           .filter(Boolean)
           .join(' ')
@@ -1487,7 +2393,7 @@ app.get('/api/media/users/:userId/media', async (req, res, next) => {
       search_applied_to_page_only: Boolean(query),
       media: media.map((item) => {
         const mediaId = String(item?.media_id || '');
-        const mxc = buildMxcUri(SYNAPSE_SERVER_NAME, mediaId);
+        const mxc = buildMxcUri(currentServerName, mediaId);
         return {
           media_id: mediaId || null,
           ...getMediaPreviewPayload(mxc),
@@ -1498,7 +2404,7 @@ app.get('/api/media/users/:userId/media', async (req, res, next) => {
           last_access_ts: Number(item?.last_access_ts || 0) || null,
           quarantined_by: item?.quarantined_by || null,
           safe_from_quarantine: Boolean(item?.safe_from_quarantine),
-          origin: SYNAPSE_SERVER_NAME,
+          origin: currentServerName,
           is_local: true
         };
       })
@@ -1576,6 +2482,7 @@ app.delete('/api/media/users/:userId/media', async (req, res, next) => {
 app.get('/api/media/rooms/:roomId/inventory', async (req, res, next) => {
   try {
     const roomId = req.params.roomId;
+    const currentServerName = getCurrentServerName();
     const source = normalizeOrderBy(req.query?.source, ['all', 'local', 'remote'], 'all');
     const includeDetails = String(req.query?.include_details || 'true').toLowerCase() !== 'false';
     const query = String(req.query?.q || '').trim();
@@ -1591,7 +2498,7 @@ app.get('/api/media/rooms/:roomId/inventory', async (req, res, next) => {
     const inventory = [];
 
     localMedia.forEach((item) => {
-      const parsed = parseMediaReference(item, SYNAPSE_SERVER_NAME);
+      const parsed = parseMediaReference(item, currentServerName);
       if (!parsed) return;
       inventory.push({
         ...parsed,
@@ -1835,14 +2742,15 @@ app.post('/api/media/item/delete', async (req, res, next) => {
   const startedAt = Date.now();
   try {
     const mxc = String(req.body?.mxc || '').trim();
+    const currentServerName = getCurrentServerName();
     const parsed = parseMxcUri(mxc);
     if (!parsed) {
       return res.status(400).json({ error: 'mxc is required in the request body.' });
     }
 
-    if (String(parsed.server).toLowerCase() !== String(SYNAPSE_SERVER_NAME).toLowerCase()) {
+    if (String(parsed.server).toLowerCase() !== String(currentServerName).toLowerCase()) {
       return res.status(400).json({
-        error: `Deleting remote media is not supported here. Only local media (${SYNAPSE_SERVER_NAME}) can be deleted.`
+        error: `Deleting remote media is not supported here. Only local media (${currentServerName}) can be deleted.`
       });
     }
 
@@ -2106,7 +3014,8 @@ app.post('/api/users', async (req, res, next) => {
   const startedAt = Date.now();
   try {
     const { user_id, localpart, password, admin, displayname } = req.body || {};
-    const resolvedUserId = user_id || (localpart ? `@${localpart}:${SYNAPSE_SERVER_NAME}` : null);
+    const currentServerName = getCurrentServerName();
+    const resolvedUserId = user_id || (localpart ? `@${localpart}:${currentServerName}` : null);
 
     if (!resolvedUserId) {
       logAdminAction({
@@ -2177,7 +3086,8 @@ app.post('/api/users', async (req, res, next) => {
     res.json(data || { ok: true });
   } catch (err) {
     const { user_id, localpart, password, admin, displayname } = req.body || {};
-    const resolvedUserId = user_id || (localpart ? `@${localpart}:${SYNAPSE_SERVER_NAME}` : null);
+    const currentServerName = getCurrentServerName();
+    const resolvedUserId = user_id || (localpart ? `@${localpart}:${currentServerName}` : null);
     logAdminAction({
       req,
       action: 'user.create',
@@ -3803,6 +4713,8 @@ app.post('/api/users/:userId/reactivate', async (req, res, next) => {
   }
 });
 
+app.use(express.static(path.join(__dirname, 'public')));
+
 app.use((err, req, res, next) => {
   console.error(err);
   res.status(err.status || 500).json({
@@ -3840,7 +4752,7 @@ app.listen(PORT, () => {
     status: 'success',
     result: {
       port: PORT,
-      server_name: SYNAPSE_SERVER_NAME
+      default_server_name: DEFAULT_SYNAPSE_SERVER_NAME || null
     }
   });
   console.log(`Synapse Admin UI running at http://localhost:${PORT}`);

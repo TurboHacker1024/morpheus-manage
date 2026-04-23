@@ -716,7 +716,9 @@ reportModalLockBtn.addEventListener('click', async () => { if (reportModalState.
 
 async function loadConfig() {
   const data = await api('/api/config');
-  serverNameEl.textContent = data?.server_name || 'unknown';
+  if (serverNameEl) {
+    serverNameEl.textContent = data?.server_name || 'unknown';
+  }
   setStatus(`Connected to ${data?.base_url || data?.server_name || 'server'}`);
 }
 

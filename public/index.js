@@ -21,6 +21,16 @@ const kpiDestructive = document.getElementById('kpiDestructive');
 const systemRefreshBtn = document.getElementById('systemRefreshBtn');
 const systemHealthPill = document.getElementById('systemHealthPill');
 const systemHealthText = document.getElementById('systemHealthText');
+const systemOverviewHealthValue = document.getElementById('systemOverviewHealthValue');
+const systemOverviewHealthMeta = document.getElementById('systemOverviewHealthMeta');
+const systemOverviewLatencyMeta = document.getElementById('systemOverviewLatencyMeta');
+const systemOverviewCacheMeta = document.getElementById('systemOverviewCacheMeta');
+const systemOverviewSyncValue = document.getElementById('systemOverviewSyncValue');
+const systemOverviewSyncMeta = document.getElementById('systemOverviewSyncMeta');
+const systemOverviewIssueValue = document.getElementById('systemOverviewIssueValue');
+const systemOverviewIssueMeta = document.getElementById('systemOverviewIssueMeta');
+const systemWarningsSection = document.getElementById('systemWarningsSection');
+const systemWarningsList = document.getElementById('systemWarningsList');
 const systemServerName = document.getElementById('systemServerName');
 const systemSynapseVersion = document.getElementById('systemSynapseVersion');
 const systemApiLatency = document.getElementById('systemApiLatency');
@@ -44,8 +54,6 @@ const systemMemoryHeap = document.getElementById('systemMemoryHeap');
 const systemFeedCount = document.getElementById('systemFeedCount');
 const systemActionEntries = document.getElementById('systemActionEntries');
 const systemActionPersist = document.getElementById('systemActionPersist');
-const systemLastAction = document.getElementById('systemLastAction');
-const systemLastError = document.getElementById('systemLastError');
 
 const feedState = {
   items: [],
@@ -166,6 +174,26 @@ function setText(element, value, fallback = 'Unknown') {
   element.textContent = rendered;
 }
 
+function setTextWithTitle(element, value, title, fallback = 'Unknown') {
+  if (!element) return;
+  setText(element, value, fallback);
+  if (title) {
+    element.title = title;
+  } else {
+    element.removeAttribute('title');
+  }
+}
+
+function setRelativeTimeText(element, ts, fallback = 'Unknown') {
+  if (!element) return;
+  const ms = Number(ts);
+  if (!Number.isFinite(ms) || ms <= 0) {
+    setTextWithTitle(element, fallback, '');
+    return;
+  }
+  setTextWithTitle(element, toRelativeTime(ms), formatDateTime(ms), fallback);
+}
+
 function getTimeRangeSince(rangeKey) {
   const now = Date.now();
   switch (rangeKey) {
@@ -200,7 +228,153 @@ function updateSummary(filteredSummary, globalSummary) {
   kpiSuccess.textContent = String(filtered.success || 0);
   kpiErrors.textContent = String(filtered.error || 0);
   kpiDestructive.textContent = String(filtered.destructive || 0);
-  systemFeedCount.textContent = String(global.total || filtered.total || 0);
+  if (systemFeedCount) {
+    systemFeedCount.textContent = String(global.total || filtered.total || 0);
+  }
+}
+
+function buildCacheSummary(cache) {
+  const entries = Number(cache.entries || 0);
+  const stale = Number(cache.stale_entries || 0);
+  const expired = Number(cache.ttl_expired_entries || 0);
+
+  if (!entries) return 'No rooms cached yet';
+  if (!stale && !expired) return 'Fresh cache';
+  if (stale && expired) return `${stale} stale, ${expired} expired`;
+  if (stale) return `${stale} stale`;
+  return `${expired} expired`;
+}
+
+function buildQueueSummary(cache) {
+  const depth = Number(cache.refresh_queue_depth || 0);
+  if (depth > 0 && cache.refresh_in_progress) {
+    return `Worker active with ${depth} pending`;
+  }
+  if (depth > 0) {
+    return `${depth} waiting to refresh`;
+  }
+  return cache.refresh_in_progress ? 'Worker active' : 'Queue idle';
+}
+
+function getLastSyncTimestamp(server, cache) {
+  return Number(cache.last_rooms_fetch_at || server.health_checked_at || 0);
+}
+
+function buildActiveIssue(server, cache, lastSyncTs) {
+  const queueDepth = Number(cache.refresh_queue_depth || 0);
+  const stale = Number(cache.stale_entries || 0);
+  const expired = Number(cache.ttl_expired_entries || 0);
+
+  if (server.api_healthy === false) {
+    return {
+      title: 'API unreachable',
+      detail: server.health_error || 'Synapse did not respond to the health probe.'
+    };
+  }
+
+  if (cache.last_rooms_fetch_error) {
+    return {
+      title: 'Fetch error',
+      detail: truncate(cache.last_rooms_fetch_error, 96)
+    };
+  }
+
+  if (queueDepth > 0) {
+    return {
+      title: 'Queue backlog',
+      detail: cache.refresh_in_progress
+        ? `${queueDepth} refresh jobs still pending.`
+        : `${queueDepth} refresh jobs are waiting to run.`
+    };
+  }
+
+  if (stale > 0 || expired > 0) {
+    return {
+      title: 'Cache stale',
+      detail: buildCacheSummary(cache)
+    };
+  }
+
+  const syncAge = lastSyncTs ? Date.now() - lastSyncTs : null;
+  if (syncAge && syncAge > 15 * 60 * 1000) {
+    return {
+      title: 'Status aging',
+      detail: `Last successful sync was ${toRelativeTime(lastSyncTs)}.`
+    };
+  }
+
+  return {
+    title: 'No issues',
+    detail: 'Everything needed for normal operation looks healthy.'
+  };
+}
+
+function buildSystemWarnings(server, cache, lastSyncTs) {
+  const warnings = [];
+  const queueDepth = Number(cache.refresh_queue_depth || 0);
+  const stale = Number(cache.stale_entries || 0);
+  const expired = Number(cache.ttl_expired_entries || 0);
+
+  if (server.api_healthy === false) {
+    warnings.push({
+      title: 'Synapse API is unreachable',
+      detail: server.health_error || 'The latest health probe could not reach Synapse.'
+    });
+  }
+
+  if (cache.last_rooms_fetch_error) {
+    warnings.push({
+      title: 'The last rooms fetch failed',
+      detail: truncate(cache.last_rooms_fetch_error, 160)
+    });
+  }
+
+  if (queueDepth > 0) {
+    warnings.push({
+      title: `Refresh queue has ${queueDepth} pending ${queueDepth === 1 ? 'job' : 'jobs'}`,
+      detail: cache.refresh_in_progress
+        ? 'The queue worker is running, but there is still backlog to clear.'
+        : 'The queue worker is idle while refresh work is pending.'
+    });
+  }
+
+  if (stale > 0 || expired > 0) {
+    warnings.push({
+      title: 'Room cache is not fully fresh',
+      detail: `${stale} stale entries and ${expired} expired entries are still present.`
+    });
+  }
+
+  if (lastSyncTs && Date.now() - lastSyncTs > 15 * 60 * 1000) {
+    warnings.push({
+      title: 'Status data may be aging',
+      detail: `Last successful sync completed ${toRelativeTime(lastSyncTs)}.`
+    });
+  }
+
+  return warnings;
+}
+
+function renderSystemWarnings(warnings) {
+  if (!systemWarningsSection || !systemWarningsList) return;
+
+  if (!warnings.length) {
+    systemWarningsSection.classList.add('hidden');
+    systemWarningsList.innerHTML = '';
+    return;
+  }
+
+  systemWarningsSection.classList.remove('hidden');
+  systemWarningsList.innerHTML = warnings
+    .map(
+      (warning) => `
+        <article class="system-warning-item">
+          <strong>${escapeHtml(warning.title)}</strong>
+          <p>${escapeHtml(warning.detail)}</p>
+        </article>
+      `
+    )
+    .join('');
 }
 
 function renderActionFeed(items) {
@@ -289,6 +463,11 @@ function renderSystemStatus(data) {
   const cache = data?.rooms_cache || {};
   const actions = data?.actions_log || {};
   const processInfo = data?.process || {};
+  const lastSyncTs = getLastSyncTimestamp(server, cache);
+  const cacheSummary = buildCacheSummary(cache);
+  const queueSummary = buildQueueSummary(cache);
+  const activeIssue = buildActiveIssue(server, cache, lastSyncTs);
+  const warnings = buildSystemWarnings(server, cache, lastSyncTs);
 
   const healthy = server.api_healthy;
   if (healthy) {
@@ -306,23 +485,57 @@ function renderSystemStatus(data) {
     ? `Synapse API reachable (${formatDurationMs(server.api_latency_ms)})`
     : `Synapse API unavailable${server.health_error ? `: ${truncate(server.health_error, 64)}` : ''}`;
   setText(systemHealthText, healthSummary, 'Waiting for health check...');
+  setText(systemOverviewHealthValue, healthy ? 'Healthy' : healthy === false ? 'Degraded' : 'Unknown');
+  setText(
+    systemOverviewHealthMeta,
+    healthy
+      ? `Synapse ${server.version || 'version unknown'} is responding normally.`
+      : server.health_error || 'Waiting for a successful health probe.',
+    'Waiting for a successful probe.'
+  );
 
   setText(systemServerName, server.name || 'unknown');
   setText(systemSynapseVersion, server.version || 'Unknown');
   setText(systemApiLatency, formatDurationMs(server.api_latency_ms));
-  setText(systemHealthChecked, `${formatDateTime(server.health_checked_at)} (${toRelativeTime(server.health_checked_at)})`);
+  setText(
+    systemOverviewLatencyMeta,
+    healthy
+      ? `Health checked ${toRelativeTime(server.health_checked_at)}`
+      : 'No healthy response yet.',
+    'Awaiting a response time sample.'
+  );
+  setRelativeTimeText(systemHealthChecked, server.health_checked_at);
   setText(systemHealthError, server.health_error || 'None');
 
-  setText(systemRoomCacheEntries, cache.entries ?? 0);
+  setTextWithTitle(
+    systemRoomCacheEntries,
+    `${Number(cache.entries || 0)} rooms`,
+    cache.last_rooms_fetch_at ? `Last rooms fetch: ${formatDateTime(cache.last_rooms_fetch_at)}` : ''
+  );
+  setText(systemOverviewCacheMeta, cacheSummary, 'Waiting for cache data.');
   setText(systemRoomCacheStale, cache.stale_entries ?? 0);
   setText(systemRoomCacheTtlExpired, cache.ttl_expired_entries ?? 0);
-  setText(systemQueueDepth, cache.refresh_queue_depth ?? 0);
-  setText(systemQueueState, cache.refresh_in_progress ? 'Running' : 'Idle');
-  setText(systemQueueLastRun, `${formatDateTime(cache.last_queue_refresh_finished_at)} (${toRelativeTime(cache.last_queue_refresh_finished_at)})`);
-  setText(systemRoomCachePersist, `${formatDateTime(cache.last_cache_persist_at)} (${toRelativeTime(cache.last_cache_persist_at)})`);
-  setText(systemRoomsFetch, `${formatDateTime(cache.last_rooms_fetch_at)} (${toRelativeTime(cache.last_rooms_fetch_at)})`);
+
+  setText(systemQueueDepth, `${Number(cache.refresh_queue_depth || 0)} pending`);
+  setText(systemQueueState, queueSummary, 'Queue idle.');
+  setRelativeTimeText(systemQueueLastRun, cache.last_queue_refresh_finished_at);
+  setRelativeTimeText(systemRoomCachePersist, cache.last_cache_persist_at);
+  setRelativeTimeText(systemRoomsFetch, cache.last_rooms_fetch_at);
   setText(systemRoomsFetchDuration, formatDurationMs(cache.last_rooms_fetch_duration_ms));
   setText(systemRoomsFetchError, cache.last_rooms_fetch_error || 'None');
+
+  setRelativeTimeText(systemOverviewSyncValue, lastSyncTs);
+  setText(
+    systemOverviewSyncMeta,
+    cache.last_rooms_fetch_at
+      ? `Last fetch took ${formatDurationMs(cache.last_rooms_fetch_duration_ms)}.`
+      : 'No successful refresh recorded yet.',
+    'No successful refresh recorded yet.'
+  );
+
+  setText(systemOverviewIssueValue, activeIssue.title);
+  setText(systemOverviewIssueMeta, activeIssue.detail);
+  renderSystemWarnings(warnings);
 
   setText(systemPid, processInfo.pid || '-');
   setText(systemNodeVersion, processInfo.node_version || '-');
@@ -334,19 +547,7 @@ function renderSystemStatus(data) {
   );
 
   setText(systemActionEntries, actions.entries ?? 0);
-  setText(systemActionPersist, `${formatDateTime(actions.last_cache_persist_at)} (${toRelativeTime(actions.last_cache_persist_at)})`);
-  setText(
-    systemLastAction,
-    actions.last_action_title
-      ? `${actions.last_action_title} (${toRelativeTime(actions.last_action_at)})`
-      : 'None'
-  );
-  setText(
-    systemLastError,
-    actions.last_error_title
-      ? truncate(`${actions.last_error_title}: ${actions.last_error_message || 'Unknown error'}`, 92)
-      : 'None'
-  );
+  setRelativeTimeText(systemActionPersist, actions.last_cache_persist_at);
 }
 
 async function loadActions({ append = false } = {}) {
@@ -401,6 +602,16 @@ async function loadSystemStatus({ force = false } = {}) {
       systemHealthPill.className = 'health-pill degraded';
     }
     setText(systemHealthText, truncate(err.message, 84));
+    setText(systemOverviewHealthValue, 'Degraded');
+    setText(systemOverviewHealthMeta, truncate(err.message, 96));
+    setText(systemOverviewIssueValue, 'Status error');
+    setText(systemOverviewIssueMeta, truncate(err.message, 96));
+    renderSystemWarnings([
+      {
+        title: 'Unable to load system status',
+        detail: truncate(err.message, 160)
+      }
+    ]);
   } finally {
     systemStatusLoading = false;
     if (systemRefreshBtn) {

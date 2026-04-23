@@ -7,17 +7,24 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;600&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;600&display=swap"
       rel="stylesheet"
     />
+    <link rel="icon" type="image/png" href="/icons/morpheus-logo.png" />
     <link rel="stylesheet" href="/style.css" />
     <link rel="stylesheet" href="/user.css" />
   </head>
-  <body>
+  <body data-shell-primary-action-label="Refresh activity" data-shell-primary-action-kind="reload">
     <div class="app-shell">
       <aside class="rail">
-        <a class="rail-logo" href="/" aria-label="Morpheus Manage home">MM</a>
+        <a class="rail-logo" href="/" aria-label="Morpheus Manage home">
+          <img src="/icons/morpheus-logo.png" alt="" />
+        </a>
         <nav class="rail-nav" aria-label="Primary navigation">
+          <a class="rail-link" href="/index.html" data-label="Home" aria-label="Home">
+            <span class="rail-icon"><img src="/icons/home-outline.svg" alt="" /></span>
+            <span class="rail-text">Home</span>
+          </a>
           <a class="rail-link active" href="/users.html" data-label="Users" aria-label="Users">
             <span class="rail-icon"><img src="/icons/people-outline.svg" alt="" /></span>
             <span class="rail-text">Users</span>
@@ -59,14 +66,14 @@
         </header>
 
         <div class="workspace-body">
-          <section class="details-grid">
-            <div class="card details-card" id="logsSection">
+          <section class="activity-grid">
+            <div class="card details-card activity-card" id="logsSection">
               <div class="card-header">
                 <div>
                   <h2>Sign-in logs</h2>
                   <p>Recent access by IP and device.</p>
                 </div>
-                <label>
+                <label class="activity-filter">
                   Time range
                   <select id="logRange">
                     <option value="1">Last 24 hours</option>
@@ -79,7 +86,7 @@
               <div class="details-list" id="logList"></div>
             </div>
 
-            <div class="card details-card" id="devicesSection">
+            <div class="card details-card activity-card" id="devicesSection">
               <div class="card-header">
                 <div>
                   <h2>Devices</h2>
@@ -89,7 +96,7 @@
               <div class="details-list" id="deviceList"></div>
             </div>
 
-            <div class="card details-card" id="joinedRoomsSection">
+            <div class="card details-card activity-card" id="joinedRoomsSection">
               <div class="card-header">
                 <div>
                   <h2>Rooms</h2>
@@ -107,4 +114,3 @@
     <script src="/user.js"></script>
   </body>
 </html>
-

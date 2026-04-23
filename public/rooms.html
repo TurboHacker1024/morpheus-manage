@@ -7,16 +7,23 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;600&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;600&display=swap"
       rel="stylesheet"
     />
+    <link rel="icon" type="image/png" href="/icons/morpheus-logo.png" />
     <link rel="stylesheet" href="/style.css" />
   </head>
-  <body>
+  <body data-shell-primary-action-label="Refresh rooms" data-shell-primary-action-target="roomRefresh">
     <div class="app-shell">
       <aside class="rail">
-        <a class="rail-logo" href="/" aria-label="Morpheus Manage home">MM</a>
+        <a class="rail-logo" href="/" aria-label="Morpheus Manage home">
+          <img src="/icons/morpheus-logo.png" alt="" />
+        </a>
         <nav class="rail-nav" aria-label="Primary navigation">
+          <a class="rail-link" href="/index.html" data-label="Home" aria-label="Home">
+            <span class="rail-icon"><img src="/icons/home-outline.svg" alt="" /></span>
+            <span class="rail-text">Home</span>
+          </a>
           <a class="rail-link" href="/users.html" data-label="Users" aria-label="Users">
             <span class="rail-icon"><img src="/icons/people-outline.svg" alt="" /></span>
             <span class="rail-text">Users</span>
@@ -112,4 +119,3 @@
     <script src="/rooms.js"></script>
   </body>
 </html>
-

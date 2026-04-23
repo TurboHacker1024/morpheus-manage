@@ -7,16 +7,27 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;600&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;600&display=swap"
       rel="stylesheet"
     />
+    <link rel="icon" type="image/png" href="/icons/morpheus-logo.png" />
     <link rel="stylesheet" href="/style.css" />
   </head>
-  <body data-media-view="storage">
+  <body
+    data-media-view="storage"
+    data-shell-primary-action-label="Refresh storage"
+    data-shell-primary-action-target="storageRefresh"
+  >
     <div class="app-shell">
       <aside class="rail">
-        <a class="rail-logo" href="/" aria-label="Morpheus Manage home">MM</a>
+        <a class="rail-logo" href="/" aria-label="Morpheus Manage home">
+          <img src="/icons/morpheus-logo.png" alt="" />
+        </a>
         <nav class="rail-nav" aria-label="Primary navigation">
+          <a class="rail-link" href="/index.html" data-label="Home" aria-label="Home">
+            <span class="rail-icon"><img src="/icons/home-outline.svg" alt="" /></span>
+            <span class="rail-text">Home</span>
+          </a>
           <a class="rail-link" href="/users.html" data-label="Users" aria-label="Users">
             <span class="rail-icon"><img src="/icons/people-outline.svg" alt="" /></span>
             <span class="rail-text">Users</span>
@@ -46,7 +57,7 @@
 
         <p class="pane-note">Room inventory focuses on media visible to Synapse admin APIs and unencrypted content paths.</p>
 
-        <div class="pane-footer">Connected server: <span id="serverName">...</span></div>
+        <div class="pane-footer">Media storage totals are scoped to the selected homeserver.</div>
       </aside>
 
       <main class="workspace">
@@ -64,7 +75,7 @@
 
         <div class="workspace-body">
           <section class="grid">
-            <div class="card" id="storageSection">
+            <div class="card storage-dashboard-card" id="storageSection">
               <div class="card-header">
                 <div>
                   <h2>Storage dashboard</h2>
@@ -77,7 +88,7 @@
                 </div>
               </div>
 
-              <div class="list-controls">
+              <div class="list-controls storage-controls">
                 <label class="search-field">
                   Search users
                   <input type="search" id="storageSearch" placeholder="@mxid or display name" />
@@ -103,7 +114,7 @@
                 <button class="btn" id="storageRefresh">Refresh</button>
               </div>
 
-              <div class="actions-kpi-grid media-kpi-grid">
+              <div class="actions-kpi-grid media-kpi-grid storage-kpi-grid">
                 <div class="action-kpi">
                   <span>Matched users</span>
                   <strong id="storageKpiUsers">0</strong>
@@ -122,7 +133,9 @@
                 </div>
               </div>
 
-              <div class="table media-storage-table" id="storageTable"></div>
+              <div class="storage-table-shell">
+                <div class="table media-storage-table" id="storageTable"></div>
+              </div>
             </div>
 
             <div class="card" id="userMediaSection">

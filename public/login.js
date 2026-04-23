@@ -4,9 +4,9 @@ const loginUser = document.getElementById('loginUser');
 const loginPassword = document.getElementById('loginPassword');
 const loginSubmitBtn = document.getElementById('loginSubmitBtn');
 const loginStatus = document.getElementById('loginStatus');
-const loginServerName = document.getElementById('loginServerName');
 const loginBaseUrl = document.getElementById('loginBaseUrl');
 const loginFlowStatus = document.getElementById('loginFlowStatus');
+const loginFallback = document.getElementById('loginFallback');
 const envFallbackBtn = document.getElementById('envFallbackBtn');
 const envFallbackNote = document.getElementById('envFallbackNote');
 
@@ -91,9 +91,8 @@ function getRememberedHomeserver() {
   }
 }
 
-function renderHomeserverSummary(baseUrl, serverName) {
-  loginBaseUrl.textContent = baseUrl || 'Enter a homeserver URL below';
-  loginServerName.textContent = serverName || 'that server';
+function renderHomeserverSummary(baseUrl) {
+  loginBaseUrl.textContent = baseUrl || 'Enter a homeserver';
 }
 
 function refreshControls() {
@@ -107,36 +106,34 @@ function refreshControls() {
 
 function renderFallbackState({ available, configured, error, baseUrl }) {
   envFallbackAvailable = Boolean(available);
+  const showFallbackSection = Boolean(available || configured);
+
+  loginFallback.classList.toggle('hidden', !showFallbackSection);
+  envFallbackBtn.classList.toggle('hidden', !envFallbackAvailable);
+  envFallbackNote.classList.add('hidden');
+  envFallbackNote.textContent = '';
 
   if (envFallbackAvailable) {
-    envFallbackBtn.classList.remove('hidden');
-    envFallbackNote.textContent = baseUrl
-      ? `A verified preconfigured fallback token is available for ${baseUrl}.`
-      : 'A verified preconfigured fallback token is available on this installation.';
+    envFallbackBtn.textContent = baseUrl ? `Use fallback token for ${baseUrl}` : 'Use fallback token';
     return;
   }
-
-  envFallbackBtn.classList.add('hidden');
 
   if (configured) {
+    envFallbackNote.classList.remove('hidden');
     envFallbackNote.textContent = error
-      ? `A preconfigured fallback token exists, but the server rejected it: ${error}`
-      : 'A preconfigured fallback token exists, but it is not currently usable.';
-    return;
+      ? `Fallback token unavailable: ${error}`
+      : 'Fallback token is configured but unavailable.';
   }
-
-  envFallbackNote.textContent =
-    'No preconfigured fallback token is configured on this installation. The homeserver field above is all you need.';
 }
 
 async function loadStatus() {
   const requestId = ++statusRequestId;
   const homeserver = getHomeserverValue();
 
-  renderHomeserverSummary(homeserver || null, homeserver ? 'that homeserver' : 'that server');
+  renderHomeserverSummary(homeserver || null);
   loginFlowStatus.textContent = homeserver ? 'Checking...' : 'Pending';
   setStatus(
-    homeserver ? 'Checking homeserver sign-in options...' : 'Enter the homeserver URL you want to manage.',
+    homeserver ? 'Checking sign-in options...' : 'Enter a homeserver.',
     homeserver ? 'muted' : 'warning'
   );
 
@@ -159,7 +156,6 @@ async function loadStatus() {
     }
 
     const resolvedBaseUrl = data?.base_url || getHomeserverValue() || null;
-    const resolvedServerName = data?.server_name || (resolvedBaseUrl ? 'that homeserver' : 'that server');
     const passwordSupported =
       data?.login?.password_supported === null || data?.login?.password_supported === undefined
         ? null
@@ -167,7 +163,7 @@ async function loadStatus() {
     const ssoSupported = Boolean(data?.login?.sso_supported);
     const flowError = data?.login?.error || null;
 
-    renderHomeserverSummary(resolvedBaseUrl, resolvedServerName);
+    renderHomeserverSummary(resolvedBaseUrl);
     renderFallbackState({
       available: data?.env_fallback_available,
       configured: data?.env_fallback_configured,
@@ -178,40 +174,22 @@ async function loadStatus() {
     if (!resolvedBaseUrl) {
       loginFlowStatus.textContent = 'Enter homeserver';
       matrixLoginEnabled = false;
-      setStatus('Enter the homeserver URL you want to manage.', 'warning');
+      setStatus('Enter a homeserver.', 'warning');
     } else if (flowError) {
       loginFlowStatus.textContent = 'Unknown';
       matrixLoginEnabled = true;
-      setStatus(
-        envFallbackAvailable
-          ? `Unable to query login flows: ${flowError}. You can still try signing in manually or use the preconfigured fallback token below.`
-          : `Unable to query login flows: ${flowError}. You can still try signing in manually.`,
-        'warning'
-      );
+      setStatus(`Couldn't verify login flow: ${flowError}`, 'warning');
     } else if (passwordSupported === false) {
       loginFlowStatus.textContent = ssoSupported ? 'SSO only' : 'Unavailable';
       matrixLoginEnabled = false;
       setStatus(
-        envFallbackAvailable
-          ? `${
-              ssoSupported
-                ? 'This homeserver is advertising SSO-style sign-in instead of password login.'
-                : 'This homeserver is not advertising password login.'
-            } You can still use the preconfigured fallback token below.`
-          : ssoSupported
-            ? 'This homeserver is advertising SSO-style sign-in instead of password login.'
-            : 'This homeserver is not advertising password login.',
+        ssoSupported ? 'Password login is unavailable on this homeserver.' : 'Password login is unavailable.',
         'warning'
       );
     } else {
       loginFlowStatus.textContent = passwordSupported ? 'Supported' : 'Unknown';
       matrixLoginEnabled = true;
-      setStatus(
-        envFallbackAvailable
-          ? 'Sign in with a Synapse admin account, or use the preconfigured fallback token below.'
-          : 'Sign in with a Synapse admin account.',
-        'muted'
-      );
+      setStatus('Ready to sign in.', 'muted');
     }
   } catch (err) {
     if (requestId !== statusRequestId) {
@@ -227,7 +205,7 @@ async function loadStatus() {
       error: null,
       baseUrl: null
     });
-    setStatus(`Unable to load sign-in options: ${err.message}. You can still try signing in manually.`, 'warning');
+    setStatus(`Couldn't load sign-in options: ${err.message}`, 'warning');
   } finally {
     if (requestId === statusRequestId) {
       refreshControls();
@@ -267,19 +245,19 @@ loginForm.addEventListener('submit', async (event) => {
   const password = loginPassword.value;
 
   if (!homeserver) {
-    setStatus('Enter the homeserver URL you want to manage.', 'warning');
+    setStatus('Enter a homeserver.', 'warning');
     refreshControls();
     return;
   }
 
   if (!user || !password) {
-    setStatus('Enter both a Matrix user ID/localpart and a password.', 'warning');
+    setStatus('Enter both account and password.', 'warning');
     return;
   }
 
   busy = true;
   refreshControls();
-  setStatus('Signing in with Matrix credentials...');
+  setStatus('Signing in...');
 
   try {
     const data = await api('/api/auth/login', {
@@ -302,7 +280,7 @@ loginForm.addEventListener('submit', async (event) => {
 envFallbackBtn.addEventListener('click', async () => {
   busy = true;
   refreshControls();
-  setStatus('Switching to preconfigured fallback token...');
+  setStatus('Using fallback token...');
 
   try {
     const data = await api('/api/auth/use-env', {

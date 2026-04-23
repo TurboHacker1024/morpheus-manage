@@ -398,8 +398,12 @@ async function revokeAllSessions() {
 async function loadConfig() {
   const config = await api('/api/config');
   const serverName = config.server_name || 'unknown';
-  serverNameEl.textContent = serverName;
-  serverNameInlineEl.textContent = serverName;
+  if (serverNameEl) {
+    serverNameEl.textContent = serverName;
+  }
+  if (serverNameInlineEl) {
+    serverNameInlineEl.textContent = serverName;
+  }
   setStatus(`Connected to ${config.base_url}`);
 }
 

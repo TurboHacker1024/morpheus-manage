@@ -7,16 +7,27 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;600&display=swap"
+      href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=IBM+Plex+Mono:wght@400;600&display=swap"
       rel="stylesheet"
     />
+    <link rel="icon" type="image/png" href="/icons/morpheus-logo.png" />
     <link rel="stylesheet" href="/style.css" />
   </head>
-  <body data-home-view="actions">
+  <body
+    data-home-view="actions"
+    data-shell-primary-action-label="Refresh feed"
+    data-shell-primary-action-target="actionRefreshBtn"
+  >
     <div class="app-shell">
       <aside class="rail">
-        <a class="rail-logo" href="/" aria-label="Morpheus Manage home">MM</a>
+        <a class="rail-logo" href="/" aria-label="Morpheus Manage home">
+          <img src="/icons/morpheus-logo.png" alt="" />
+        </a>
         <nav class="rail-nav" aria-label="Primary navigation">
+          <a class="rail-link active" href="/index.html" data-label="Home" aria-label="Home">
+            <span class="rail-icon"><img src="/icons/home-outline.svg" alt="" /></span>
+            <span class="rail-text">Home</span>
+          </a>
           <a class="rail-link" href="/users.html" data-label="Users" aria-label="Users">
             <span class="rail-icon"><img src="/icons/people-outline.svg" alt="" /></span>
             <span class="rail-text">Users</span>
@@ -51,9 +62,7 @@
             <p class="page-eyebrow">Morpheus Manage</p>
             <p class="page-breadcrumb">Home / Recent actions</p>
             <h1 class="page-title">Recent actions</h1>
-            <p class="page-subtitle">
-              Audit feed for admin operations, outcomes, and high-risk changes across users, rooms, and media.
-            </p>
+            <p class="page-subtitle">Administrative audit feed across users, rooms, media, and system activity.</p>
           </div>
           <div class="status" id="dashboardStatus">Loading dashboard...</div>
         </header>
@@ -64,7 +73,7 @@
               <div class="card-header">
                 <div>
                   <h2>System status</h2>
-                  <p>Live Synapse health, cache metrics, queue depth, runtime, and audit-log state.</p>
+                  <p>Live Synapse health, queue state, cache freshness, and operator-facing issues.</p>
                 </div>
                 <button class="btn ghost" id="systemRefreshBtn">Refresh status</button>
               </div>
@@ -74,50 +83,94 @@
                 <span class="system-health-text" id="systemHealthText">Waiting for health check...</span>
               </div>
 
-              <div class="grid system-grid">
-                <div class="card system-card">
-                  <h3>Synapse API</h3>
-                  <div class="info-list">
-                    <div class="info-item"><span>Connected server</span><strong id="systemServerName">...</strong></div>
-                    <div class="info-item"><span>Synapse version</span><strong id="systemSynapseVersion">...</strong></div>
-                    <div class="info-item"><span>API latency</span><strong id="systemApiLatency">...</strong></div>
-                    <div class="info-item"><span>Health checked</span><strong id="systemHealthChecked">...</strong></div>
-                    <div class="info-item"><span>Health error</span><strong id="systemHealthError">None</strong></div>
-                  </div>
-                </div>
+              <div class="grid system-overview-grid">
+                <article class="system-overview-card">
+                  <span class="system-overview-label">API health</span>
+                  <strong class="system-overview-value" id="systemOverviewHealthValue">Unknown</strong>
+                  <p class="system-overview-meta" id="systemOverviewHealthMeta">Waiting for a successful probe.</p>
+                </article>
 
-                <div class="card system-card">
-                  <h3>Room cache and queue</h3>
-                  <div class="info-list">
-                    <div class="info-item"><span>Cached rooms</span><strong id="systemRoomCacheEntries">0</strong></div>
-                    <div class="info-item"><span>Stale cache entries</span><strong id="systemRoomCacheStale">0</strong></div>
-                    <div class="info-item"><span>TTL-expired entries</span><strong id="systemRoomCacheTtlExpired">0</strong></div>
-                    <div class="info-item"><span>Refresh queue depth</span><strong id="systemQueueDepth">0</strong></div>
-                    <div class="info-item"><span>Queue worker</span><strong id="systemQueueState">Idle</strong></div>
-                    <div class="info-item"><span>Last queue refresh</span><strong id="systemQueueLastRun">Unknown</strong></div>
-                    <div class="info-item"><span>Last rooms fetch</span><strong id="systemRoomsFetch">Unknown</strong></div>
-                    <div class="info-item"><span>Rooms fetch duration</span><strong id="systemRoomsFetchDuration">Unknown</strong></div>
-                    <div class="info-item"><span>Last rooms fetch error</span><strong id="systemRoomsFetchError">None</strong></div>
-                    <div class="info-item"><span>Room cache persisted</span><strong id="systemRoomCachePersist">Unknown</strong></div>
-                  </div>
-                </div>
+                <article class="system-overview-card">
+                  <span class="system-overview-label">Latency</span>
+                  <strong class="system-overview-value" id="systemApiLatency">Unknown</strong>
+                  <p class="system-overview-meta" id="systemOverviewLatencyMeta">Awaiting a response time sample.</p>
+                </article>
 
-                <div class="card system-card">
-                  <h3>Runtime and audit log</h3>
-                  <div class="info-list">
-                    <div class="info-item"><span>Node PID</span><strong id="systemPid">...</strong></div>
-                    <div class="info-item"><span>Node version</span><strong id="systemNodeVersion">...</strong></div>
-                    <div class="info-item"><span>Uptime</span><strong id="systemProcessUptime">...</strong></div>
-                    <div class="info-item"><span>Memory RSS</span><strong id="systemMemoryRss">...</strong></div>
-                    <div class="info-item"><span>Heap used / total</span><strong id="systemMemoryHeap">...</strong></div>
-                    <div class="info-item"><span>Recent feed records</span><strong id="systemFeedCount">0</strong></div>
-                    <div class="info-item"><span>Action log entries</span><strong id="systemActionEntries">0</strong></div>
-                    <div class="info-item"><span>Action log persisted</span><strong id="systemActionPersist">Unknown</strong></div>
-                    <div class="info-item"><span>Latest action</span><strong id="systemLastAction">None</strong></div>
-                    <div class="info-item"><span>Latest error</span><strong id="systemLastError">None</strong></div>
-                  </div>
-                </div>
+                <article class="system-overview-card">
+                  <span class="system-overview-label">Room cache</span>
+                  <strong class="system-overview-value" id="systemRoomCacheEntries">0 rooms</strong>
+                  <p class="system-overview-meta" id="systemOverviewCacheMeta">Waiting for cache data.</p>
+                </article>
+
+                <article class="system-overview-card">
+                  <span class="system-overview-label">Queue</span>
+                  <strong class="system-overview-value" id="systemQueueDepth">0 pending</strong>
+                  <p class="system-overview-meta" id="systemQueueState">Queue idle.</p>
+                </article>
+
+                <article class="system-overview-card">
+                  <span class="system-overview-label">Last sync</span>
+                  <strong class="system-overview-value" id="systemOverviewSyncValue">Unknown</strong>
+                  <p class="system-overview-meta" id="systemOverviewSyncMeta">No successful refresh recorded yet.</p>
+                </article>
+
+                <article class="system-overview-card">
+                  <span class="system-overview-label">Active issue</span>
+                  <strong class="system-overview-value" id="systemOverviewIssueValue">No issues</strong>
+                  <p class="system-overview-meta" id="systemOverviewIssueMeta">Everything needed for normal operation looks healthy.</p>
+                </article>
               </div>
+
+              <section class="system-warning-block hidden" id="systemWarningsSection">
+                <div class="system-warning-head">
+                  <h3>Warnings</h3>
+                  <p>Only shown when the current state needs attention.</p>
+                </div>
+                <div class="system-warning-list" id="systemWarningsList"></div>
+              </section>
+
+              <details class="system-advanced">
+                <summary>
+                  <span>Advanced details</span>
+                  <span>Runtime, cache diagnostics, and persistence timestamps.</span>
+                </summary>
+
+                <div class="grid system-advanced-grid">
+                  <div class="system-card">
+                    <h3>API and cache diagnostics</h3>
+                    <div class="info-list">
+                      <div class="info-item"><span>Connected server</span><strong id="systemServerName">...</strong></div>
+                      <div class="info-item"><span>Synapse version</span><strong id="systemSynapseVersion">...</strong></div>
+                      <div class="info-item"><span>Health checked</span><strong id="systemHealthChecked">...</strong></div>
+                      <div class="info-item"><span>Health error</span><strong id="systemHealthError">None</strong></div>
+                      <div class="info-item"><span>Last queue refresh</span><strong id="systemQueueLastRun">Unknown</strong></div>
+                      <div class="info-item"><span>Last rooms fetch</span><strong id="systemRoomsFetch">Unknown</strong></div>
+                      <div class="info-item"><span>Rooms fetch duration</span><strong id="systemRoomsFetchDuration">Unknown</strong></div>
+                      <div class="info-item"><span>Room cache persisted</span><strong id="systemRoomCachePersist">Unknown</strong></div>
+                    </div>
+                  </div>
+
+                  <div class="system-card">
+                    <h3>Runtime details</h3>
+                    <div class="info-list">
+                      <div class="info-item"><span>Uptime</span><strong id="systemProcessUptime">...</strong></div>
+                      <div class="info-item"><span>Memory RSS</span><strong id="systemMemoryRss">...</strong></div>
+                      <div class="info-item"><span>Heap used / total</span><strong id="systemMemoryHeap">...</strong></div>
+                      <div class="info-item"><span>Node version</span><strong id="systemNodeVersion">...</strong></div>
+                      <div class="info-item"><span>Node PID</span><strong id="systemPid">...</strong></div>
+                    </div>
+                  </div>
+
+                  <div class="system-card">
+                    <h3>Background activity</h3>
+                    <div class="info-list">
+                      <div class="info-item"><span>Tracked feed records</span><strong id="systemFeedCount">0</strong></div>
+                      <div class="info-item"><span>Action log entries</span><strong id="systemActionEntries">0</strong></div>
+                      <div class="info-item"><span>Action log persisted</span><strong id="systemActionPersist">Unknown</strong></div>
+                    </div>
+                  </div>
+                </div>
+              </details>
             </div>
 
             <div class="card recent-actions-card" id="recentSection">
@@ -210,4 +263,3 @@
     <script src="/index.js"></script>
   </body>
 </html>
-

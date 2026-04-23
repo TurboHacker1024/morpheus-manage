@@ -140,7 +140,7 @@ function renderHeader() {
     { label: 'User', key: 'user', sortable: true },
     { label: 'Admin', key: 'admin', sortable: true },
     { label: 'Status', key: 'status', sortable: true },
-    { label: 'Action', key: 'action', sortable: false }
+    { label: 'Controls', key: 'action', sortable: false }
   ];
 
   columns.forEach((col) => {
@@ -211,8 +211,9 @@ function renderUsers(users) {
     const infoButton = document.createElement('button');
     infoButton.className = 'info-btn';
     infoButton.type = 'button';
-    infoButton.textContent = 'i';
-    infoButton.setAttribute('aria-label', 'User info');
+    infoButton.textContent = 'Details';
+    infoButton.title = 'View account details';
+    infoButton.setAttribute('aria-label', 'View user details');
     infoButton.addEventListener('click', () => openInfoModal(user.name));
 
     const menuWrapper = document.createElement('div');
@@ -221,16 +222,21 @@ function renderUsers(users) {
     const menuButton = document.createElement('button');
     menuButton.className = 'btn ghost menu-trigger';
     menuButton.type = 'button';
-    menuButton.textContent = '⋯';
-    menuButton.setAttribute('aria-label', 'User actions');
+    menuButton.textContent = 'Actions';
+    menuButton.title = 'Open user actions';
+    menuButton.setAttribute('aria-label', 'Open user actions');
+    menuButton.setAttribute('aria-haspopup', 'menu');
+    menuButton.setAttribute('aria-expanded', 'false');
 
     const menuPanel = document.createElement('div');
     menuPanel.className = 'menu-panel';
+    menuPanel.setAttribute('role', 'menu');
 
     const addMenuItem = (label, onClick, isDanger = false) => {
       const item = document.createElement('button');
       item.type = 'button';
       item.className = `menu-item${isDanger ? ' danger' : ''}`;
+      item.setAttribute('role', 'menuitem');
       item.textContent = label;
       item.addEventListener('click', () => {
         closeMenuPanel();
@@ -264,16 +270,24 @@ function renderUsers(users) {
 
     menuButton.addEventListener('click', (event) => {
       event.stopPropagation();
-      if (openMenuPanel && openMenuPanel !== menuPanel) {
-        closeMenuPanel();
+      const wasOpen = openMenuPanel === menuPanel && menuPanel.classList.contains('open');
+
+      closeMenuPanel();
+      if (wasOpen) {
+        return;
       }
-      const isOpen = menuPanel.classList.toggle('open');
-      if (isOpen) {
+
+      row.classList.add('menu-open');
+      menuPanel.classList.add('open');
+      menuButton.setAttribute('aria-expanded', 'true');
+      openMenuPanel = menuPanel;
+
+      requestAnimationFrame(() => {
+        if (openMenuPanel !== menuPanel || !menuPanel.classList.contains('open')) {
+          return;
+        }
         positionMenuPanel(menuPanel, menuButton);
-        openMenuPanel = menuPanel;
-      } else {
-        openMenuPanel = null;
-      }
+      });
     });
 
     menuWrapper.appendChild(menuButton);
@@ -622,11 +636,16 @@ function closeDeactivateModal() {
 
 function closeMenuPanel() {
   if (openMenuPanel) {
+    const row = openMenuPanel.closest('.table-row');
+    const trigger = openMenuPanel.closest('.menu')?.querySelector('.menu-trigger');
+
     openMenuPanel.classList.remove('open');
     openMenuPanel.style.position = '';
     openMenuPanel.style.top = '';
     openMenuPanel.style.left = '';
     openMenuPanel.style.right = '';
+    row?.classList.remove('menu-open');
+    trigger?.setAttribute('aria-expanded', 'false');
     openMenuPanel = null;
   }
 }
